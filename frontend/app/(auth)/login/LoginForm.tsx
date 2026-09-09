@@ -36,7 +36,7 @@ export default function LoginForm() {
         const body = await res.json();
         throw new Error(body.message || 'Ошибка входа');
       }
-      router.push('/dashboard');
+      router.push('/hub');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка входа');
     }

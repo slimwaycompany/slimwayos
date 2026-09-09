@@ -43,7 +43,7 @@ export default function RegisterForm() {
         const body = await res.json();
         throw new Error(body.message || 'Ошибка регистрации');
       }
-      router.push('/dashboard');
+      router.push('/hub');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка регистрации');
     }
