@@ -5,7 +5,6 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { User } from '../users/user.entity';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -26,7 +25,7 @@ export class AuthController {
   @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  me(@CurrentUser() user: User) {
+  me(@CurrentUser() user: Record<string, unknown>) {
     return user;
   }
 }

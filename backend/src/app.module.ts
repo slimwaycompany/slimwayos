@@ -3,8 +3,6 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
-import { UsersModule } from './modules/users/users.module';
-import { WeightModule } from './modules/weight/weight.module';
 
 @Module({
   imports: [
@@ -13,8 +11,6 @@ import { WeightModule } from './modules/weight/weight.module';
       envFilePath: ['.env.local', '.env'],
     }),
     AuthModule,
-    UsersModule,
-    WeightModule,
   ],
   controllers: [AppController],
   providers: [AppService],
