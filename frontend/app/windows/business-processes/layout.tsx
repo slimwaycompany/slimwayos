@@ -1,9 +1,9 @@
 import WindowHeader from '@/app/components/WindowHeader';
 
-export default function SalesLayout({ children }: { children: React.ReactNode }) {
+export default function BusinessProcessesLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-gray-950">
-      <WindowHeader title="Продажи" />
+      <WindowHeader title="Бизнес-процессы" />
       <main className="flex-1 p-6">{children}</main>
     </div>
   );
