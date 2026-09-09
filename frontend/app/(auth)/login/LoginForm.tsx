@@ -1,79 +1,82 @@
 'use client';
 
+import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { setSession, API } from '@/lib/auth';
 
-const loginSchema = z.object({
-  email: z.string().email('Некорректный email'),
+const schema = z.object({
+  email:    z.string().email('Некорректный email'),
   password: z.string().min(6, 'Минимум 6 символов'),
 });
-
-type LoginData = z.infer<typeof loginSchema>;
+type FormData = z.infer<typeof schema>;
 
 export default function LoginForm() {
   const router = useRouter();
   const [error, setError] = useState('');
+  const { register, handleSubmit, formState: { errors, isSubmitting } } =
+    useForm<FormData>({ resolver: zodResolver(schema) });
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-  } = useForm<LoginData>({ resolver: zodResolver(loginSchema) });
-
-  const onSubmit = async (data: LoginData) => {
+  const onSubmit = async (data: FormData) => {
     setError('');
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/auth/login`, {
+      const res = await fetch(`${API}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data),
-        credentials: 'include',
       });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.message || 'Ошибка входа');
-      }
-      router.push('/hub');
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.message ?? 'Ошибка входа');
+
+      setSession(body.session.access_token, {
+        is_developer:        body.is_developer,
+        must_change_password: body.must_change_password,
+      });
+
+      router.push(body.must_change_password ? '/login/change-password' : '/hub');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Ошибка входа');
     }
   };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
       <div>
-        <label className="block text-sm font-medium text-gray-700">Email</label>
+        <label className="block text-caption text-gray-400 mb-1">Email</label>
         <input
           type="email"
           autoComplete="email"
-          className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+          className="w-full glass rounded-xl px-4 py-2.5 text-body text-gray-200 outline-none placeholder-gray-600"
+          placeholder="you@example.com"
           {...register('email')}
         />
-        {errors.email && <p className="mt-1 text-xs text-red-500">{errors.email.message}</p>}
+        {errors.email && <p className="mt-1 text-caption text-red-400">{errors.email.message}</p>}
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-gray-700">Пароль</label>
+        <label className="block text-caption text-gray-400 mb-1">Пароль</label>
         <input
           type="password"
           autoComplete="current-password"
-          className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
+          className="w-full glass rounded-xl px-4 py-2.5 text-body text-gray-200 outline-none placeholder-gray-600"
+          placeholder="••••••••"
           {...register('password')}
         />
-        {errors.password && <p className="mt-1 text-xs text-red-500">{errors.password.message}</p>}
+        {errors.password && <p className="mt-1 text-caption text-red-400">{errors.password.message}</p>}
       </div>
 
       {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-600">{error}</div>
+        <div className="rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-body text-red-400">
+          {error}
+        </div>
       )}
 
       <button
         type="submit"
         disabled={isSubmitting}
-        className="w-full rounded-lg bg-green-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 disabled:opacity-50"
+        className="w-full rounded-xl bg-teal py-2.5 text-body font-semibold text-gray-950 transition-opacity hover:opacity-80 disabled:opacity-50 mt-2"
       >
         {isSubmitting ? 'Вход...' : 'Войти'}
       </button>

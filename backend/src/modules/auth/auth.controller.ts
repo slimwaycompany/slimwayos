@@ -1,9 +1,21 @@
-import { Controller, Post, Get, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
-import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { DeveloperGuard } from './guards/developer.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('auth')
@@ -11,15 +23,45 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
-  @Post('register')
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
-  }
-
   @Post('login')
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
+  }
+
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  changePassword(
+    @CurrentUser() user: Record<string, unknown>,
+    @Headers('authorization') authorization: string,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    const token = authorization?.replace(/^Bearer\s+/i, '') ?? '';
+    return this.authService.changePassword(user.id as string, token, dto);
+  }
+
+  @Post('employees')
+  @UseGuards(JwtAuthGuard, DeveloperGuard)
+  @ApiBearerAuth()
+  createEmployee(@Body() dto: CreateEmployeeDto) {
+    return this.authService.createEmployee(dto);
+  }
+
+  @Get('employees')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  listEmployees() {
+    return this.authService.listEmployees();
+  }
+
+  @Post('reset-password/:userId')
+  @UseGuards(JwtAuthGuard, DeveloperGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  resetPassword(@Param('userId') userId: string) {
+    return this.authService.resetPassword(userId);
   }
 
   @Get('me')
