@@ -6,12 +6,16 @@
   :root {
     --teal: #02BDB6;
     --blue-brand: #263CD9;
+    --bg: #030711;
+    --text: #F1F5F9;
   }
 
   * { box-sizing: border-box; }
 
   body {
-    @apply bg-gray-950 text-gray-100 antialiased;
+    background-color: var(--bg);
+    color: var(--text);
+    @apply antialiased;
     font-size: 13px;
   }
 

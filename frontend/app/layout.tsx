@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
+import ThemeLoader from './components/ThemeLoader';
 
 const inter = Inter({ subsets: ['latin', 'cyrillic'] });
 
@@ -16,7 +17,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ru" suppressHydrationWarning>
-      <body className={inter.className}>{children}</body>
+      <body className={inter.className}>
+        <ThemeLoader />
+        {children}
+      </body>
     </html>
   );
 }
