@@ -4,14 +4,11 @@ import { useState } from 'react';
 import WindowNav, { type NavSection } from '@/app/components/WindowNav';
 
 const sections: NavSection[] = [
-  { id: 'personal',  label: 'Личные данные' },
-  { id: 'shifts',    label: 'Мои смены / график' },
-  { id: 'tasks',     label: 'Мои задачи' },
-  { id: 'notifs',    label: 'Уведомления' },
-  { id: 'history',   label: 'История действий' },
+  { id: 'appearance',    label: 'Внешний вид' },
+  { id: 'sounds',        label: 'Звуки и уведомления' },
 ];
 
-export default function ProfilePage() {
+export default function SettingsPage() {
   const [active, setActive] = useState(sections[0].id);
   const current = sections.find((s) => s.id === active)!;
 

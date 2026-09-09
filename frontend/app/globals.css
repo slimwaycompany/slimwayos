@@ -4,16 +4,15 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --teal: #02BDB6;
+    --blue-brand: #263CD9;
   }
 
-  * {
-    @apply border-gray-200;
-  }
+  * { box-sizing: border-box; }
 
   body {
-    @apply bg-white text-gray-900 antialiased;
+    @apply bg-gray-950 text-gray-100 antialiased;
+    font-size: 13px;
   }
 
   h1, h2, h3, h4, h5, h6 {
@@ -21,8 +20,53 @@
   }
 }
 
+@layer components {
+  /* Apple-style glassmorphism card */
+  .glass {
+    background: rgba(255, 255, 255, 0.06);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  }
+
+  .glass-hover {
+    @apply glass transition-all duration-200;
+  }
+  .glass-hover:hover {
+    background: rgba(255, 255, 255, 0.10);
+    border-color: rgba(2, 189, 182, 0.35);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(2, 189, 182, 0.15);
+  }
+
+  /* Glassmorphism panel (sidebar / header) */
+  .glass-panel {
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-color: rgba(255, 255, 255, 0.06);
+  }
+
+  /* Teal glow dot */
+  .status-online {
+    background: #34d399;
+    box-shadow: 0 0 8px rgba(52, 211, 153, 0.7);
+  }
+}
+
 @layer utilities {
   .animate-fade-in {
     animation: fadeIn 0.3s ease-in-out;
   }
+  .text-caption    { font-size: 8px;  line-height: 1.4; }
+  .text-body       { font-size: 13px; line-height: 1.6; }
+  .text-subheading { font-size: 21px; line-height: 1.4; font-weight: 600; }
+  .text-heading    { font-size: 34px; line-height: 1.2; font-weight: 700; }
+  .text-display    { font-size: 55px; line-height: 1.1; font-weight: 800; }
+}
+
+@keyframes fadeIn {
+  0%   { opacity: 0; }
+  100% { opacity: 1; }
 }
