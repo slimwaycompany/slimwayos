@@ -7,7 +7,7 @@ interface StatsCardProps {
   color: string;
 }
 
-const colorMap = {
+const colorMap: Record<string, string> = {
   green: 'bg-green-50 text-green-700',
   blue: 'bg-blue-50 text-blue-700',
   purple: 'bg-purple-50 text-purple-700',
