@@ -33,34 +33,41 @@ const tiles: Tile[] = [
 
 export default function HubPage() {
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-br from-gray-950 via-gray-900 to-green-950">
-      <header className="flex items-center justify-between px-8 py-6">
-        <div>
-          <h1 className="text-2xl font-bold text-white">SlimWay OS</h1>
-          <p className="text-sm text-gray-400">Выберите раздел</p>
-        </div>
-      </header>
+    <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-gray-950 via-gray-900 to-gray-950 px-6 py-12">
+      {/* Centered title */}
+      <div className="mb-2 text-center">
+        <h1 className="text-4xl font-bold tracking-tight">
+          <span style={{ color: '#02BDB6' }}>SlimWay</span>
+          <span style={{ color: '#263CD9' }}> OS</span>
+        </h1>
+        <p className="mt-2 text-sm text-gray-400">Выберите раздел</p>
+      </div>
 
-      <main className="flex flex-1 items-center justify-center px-6 py-8">
-        <div className="grid w-full max-w-4xl grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-          {tiles.map(({ key, label, icon: Icon, href }) => (
-            <Link key={key} href={href} className="block">
+      {/* Tile grid */}
+      <div className="mt-10 grid w-full max-w-4xl grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-4">
+        {tiles.map(({ key, label, icon: Icon, href }) => (
+          <Link key={key} href={href} className="block">
+            <div
+              className={clsx(
+                'group flex flex-col items-center justify-center gap-5 rounded-2xl border p-10 text-center transition-all duration-200',
+                'border-gray-700 bg-gray-800/50',
+                'hover:border-[#02BDB6]/60 hover:bg-gray-800 hover:shadow-xl hover:shadow-[#02BDB6]/10',
+              )}
+            >
               <div
-                className={clsx(
-                  'group flex flex-col items-center justify-center gap-4 rounded-2xl border p-8 text-center transition-all duration-200',
-                  'cursor-pointer border-gray-700 bg-gray-800/50',
-                  'hover:border-green-500 hover:bg-gray-800 hover:shadow-lg hover:shadow-green-900/20',
-                )}
+                className="flex h-16 w-16 items-center justify-center rounded-2xl transition-colors"
+                style={{ background: 'rgba(2,189,182,0.12)', color: '#02BDB6' }}
               >
-                <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-green-900/50 text-green-400 transition-colors group-hover:bg-green-600 group-hover:text-white">
-                  <Icon className="h-7 w-7" />
-                </div>
-                <span className="text-base font-semibold text-gray-100">{label}</span>
+                <Icon
+                  className="h-8 w-8 transition-colors group-hover:text-white"
+                  style={{ color: 'inherit' }}
+                />
               </div>
-            </Link>
-          ))}
-        </div>
-      </main>
+              <span className="text-lg font-semibold leading-tight text-gray-100">{label}</span>
+            </div>
+          </Link>
+        ))}
+      </div>
     </div>
   );
 }
