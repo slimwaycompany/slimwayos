@@ -5,6 +5,9 @@ import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
 import { CatalogModule } from './modules/catalog/catalog.module';
 import { ProfileModule } from './modules/profile/profile.module';
+import { ShiftsModule } from './modules/shifts/shifts.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { BranchSettingsModule } from './modules/branch-settings/branch-settings.module';
 
 @Module({
   imports: [
@@ -15,6 +18,9 @@ import { ProfileModule } from './modules/profile/profile.module';
     AuthModule,
     CatalogModule,
     ProfileModule,
+    ShiftsModule,
+    DashboardModule,
+    BranchSettingsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
