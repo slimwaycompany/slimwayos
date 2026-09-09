@@ -102,10 +102,10 @@ export default function BusinessProcessesPage() {
           onClick={() => setActive(null)}
         >
           <div
-            className="glass w-full max-w-md p-6 shadow-2xl animate-fade-in"
+            className="glass flex h-[500px] w-[640px] flex-col p-6 shadow-2xl animate-fade-in"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mb-5 flex items-center justify-between">
+            <div className="mb-5 flex shrink-0 items-center justify-between">
               <h2 className="text-subheading text-white">{active.title}</h2>
               <button
                 onClick={() => setActive(null)}
@@ -114,8 +114,10 @@ export default function BusinessProcessesPage() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            <p className="text-body text-gray-400">{active.description}</p>
-            <p className="mt-4 text-body text-gray-500">{active.content}</p>
+            <div className="flex-1 overflow-auto">
+              <p className="text-body text-gray-400">{active.description}</p>
+              <p className="mt-4 text-body text-gray-500">{active.content}</p>
+            </div>
           </div>
         </div>
       )}
