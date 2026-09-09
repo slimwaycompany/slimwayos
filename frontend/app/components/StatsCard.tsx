@@ -4,7 +4,7 @@ interface StatsCardProps {
   label: string;
   value: string | number;
   unit: string;
-  color: 'green' | 'blue' | 'purple' | 'orange';
+  color: string;
 }
 
 const colorMap = {
