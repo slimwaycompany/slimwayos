@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { X, MessageSquare, HelpCircle, Bell, LayoutList, Cloud } from 'lucide-react';
+import { X, MessageSquare, HelpCircle, Bell, LayoutList, Cloud, LogOut } from 'lucide-react';
+import { clearSession, callLogoutApi } from '@/lib/auth';
 
 const rightItems = [
   { icon: MessageSquare, label: 'Чат' },
@@ -27,6 +28,12 @@ function formatUptime(seconds: number): string {
 
 export default function WindowShell({ title, children }: WindowShellProps) {
   const router = useRouter();
+
+  const handleLogout = async () => {
+    await callLogoutApi();
+    clearSession();
+    router.push('/login');
+  };
   const [time, setTime]             = useState('');
   const [weather, setWeather]       = useState<string | null>(null);
   const [serverOnline, setServerOnline] = useState(false);
@@ -159,6 +166,16 @@ export default function WindowShell({ title, children }: WindowShellProps) {
               <Icon className="h-5 w-5" />
             </button>
           ))}
+
+          <div className="mt-auto">
+            <button
+              title="Выйти"
+              onClick={handleLogout}
+              className="flex h-10 w-10 items-center justify-center rounded-xl text-gray-500 transition-colors hover:bg-red-500/10 hover:text-red-400"
+            >
+              <LogOut className="h-5 w-5" />
+            </button>
+          </div>
         </aside>
       </div>
     </div>

@@ -64,6 +64,15 @@ export class AuthController {
     return this.authService.resetPassword(userId);
   }
 
+  @Post('logout')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  logout(@Headers('authorization') authorization: string) {
+    const token = authorization?.replace(/^Bearer\s+/i, '') ?? '';
+    return this.authService.logout(token);
+  }
+
   @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()

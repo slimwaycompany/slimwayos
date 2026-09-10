@@ -135,6 +135,16 @@ export class AuthService {
     return data;
   }
 
+  async logout(accessToken: string) {
+    try {
+      const userClient = createUserClient(accessToken);
+      await userClient.auth.signOut();
+    } catch {
+      // best-effort: invalidate session on Supabase side
+    }
+    return { success: true };
+  }
+
   async findById(id: string): Promise<Record<string, unknown> | null> {
     const profile = await this.getProfile(id);
     return profile as Record<string, unknown> | null;
