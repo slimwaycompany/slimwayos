@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { X, MessageSquare, HelpCircle, Bell, LayoutList, Cloud, LogOut } from 'lucide-react';
+import { X, MessageSquare, HelpCircle, Bell, LayoutList, Cloud, LogOut, Calculator as CalcIcon } from 'lucide-react';
 import { clearSession, callLogoutApi } from '@/lib/auth';
+import Calculator from '@/app/components/shared/Calculator';
 
 const rightItems = [
   { icon: MessageSquare, label: 'Чат' },
@@ -34,6 +35,7 @@ export default function WindowShell({ title, children }: WindowShellProps) {
     clearSession();
     router.push('/login');
   };
+  const [showCalc, setShowCalc]     = useState(false);
   const [time, setTime]             = useState('');
   const [weather, setWeather]       = useState<string | null>(null);
   const [serverOnline, setServerOnline] = useState(false);
@@ -108,6 +110,7 @@ export default function WindowShell({ title, children }: WindowShellProps) {
   ].filter(Boolean).join(' | ');
 
   return (
+    <>
     <div className="flex min-h-screen flex-col bg-gray-950">
       {/* Glassmorphism header */}
       <header className="glass-panel flex shrink-0 items-center border-b px-6 py-3">
@@ -166,6 +169,13 @@ export default function WindowShell({ title, children }: WindowShellProps) {
               <Icon className="h-5 w-5" />
             </button>
           ))}
+          <button
+            title="Калькулятор"
+            onClick={() => setShowCalc(true)}
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-gray-500 transition-colors hover:bg-white/10 hover:text-gray-200"
+          >
+            <CalcIcon className="h-5 w-5" />
+          </button>
 
           <div className="mt-auto">
             <button
@@ -179,5 +189,7 @@ export default function WindowShell({ title, children }: WindowShellProps) {
         </aside>
       </div>
     </div>
+    {showCalc && <Calculator onClose={() => setShowCalc(false)} />}
+    </>
   );
 }

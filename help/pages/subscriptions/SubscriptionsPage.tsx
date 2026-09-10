@@ -1,0 +1,487 @@
+import React, { useState, useEffect, useCallback } from 'react'
+import { CreditCard, Plus, X, AlertCircle, Trash2, Eye, ToggleLeft, ToggleRight, Search, Link, Unlink } from 'lucide-react'
+import { PeriodFilter } from '../../components/ui/PeriodFilter'
+import { PageHeader } from '../../components/layout/PageHeader'
+import { usePeriodFilter } from '../../hooks/usePeriodFilter'
+import { subscriptionTemplatesApi } from '../../api/subscription-templates.api'
+import { branchSubscriptionTemplatesApi } from '../../api/branch-subscription-templates.api'
+import { subscriptionsApi } from '../../api/subscriptions.api'
+import { useAuth } from '../../hooks/useAuth'
+import { ContextMenu, type ContextMenuEntry } from '../../components/ContextMenu'
+import type { SubscriptionTemplate, BranchSubscriptionTemplate, Subscription, DeviceType } from '../../types'
+import { Skeleton } from '@/components/ui/skeleton'
+
+// ─── helpers ───────────────────────────────────────────────────────────────
+
+function getTimeUntilEnd(dateEnd: string): string {
+  const now = new Date()
+  const end = new Date(dateEnd)
+  const diffMs = end.getTime() - now.getTime()
+  if (diffMs < 0) return 'Истёк'
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+  const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60))
+  if (days > 0) return `${days} дн. ${hours} ч.`
+  return `${hours} ч.`
+}
+
+function getCountdownColor(dateEnd: string): string {
+  const now = new Date()
+  const end = new Date(dateEnd)
+  const diffMs = end.getTime() - now.getTime()
+  if (diffMs < 0) return '#71717A'
+  const days = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+  if (days >= 14) return 'var(--color-success)'
+  if (days >= 7)  return 'var(--color-warning)'
+  if (days >= 3)  return '#f97316'
+  return 'var(--color-danger)'
+}
+
+// ─── constants ─────────────────────────────────────────────────────────────
+
+const DEVICE_TYPES: { value: DeviceType; label: string; color: string }[] = [
+  { value: 'vacuactiv',  label: 'VacuActiv',  color: 'var(--accent)' },
+  { value: 'rollshape',  label: 'RollShape',  color: '#263CD9' },
+  { value: 'infrastep',  label: 'InfraStep',  color: '#8b5cf6' },
+  { value: 'infrashape', label: 'InfraShape', color: 'var(--color-warning)' },
+]
+
+function typeColor(t: DeviceType) { return DEVICE_TYPES.find(d => d.value === t)?.color ?? '#71717A' }
+function typeLabel(t: DeviceType) { return DEVICE_TYPES.find(d => d.value === t)?.label ?? t }
+
+function getServerError(e: unknown): string | null {
+  return (e as { response?: { data?: { error?: string } } })?.response?.data?.error ?? null
+}
+
+const inputStyle: React.CSSProperties = {
+  height: 36, padding: '0 13px', background: 'var(--bg-card)',
+  border: '1px solid var(--border)', borderRadius: 8,
+  color: 'var(--text)', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box',
+}
+
+// ─── AddFromCatalogModal ──────────────────────────────────────────────────────
+
+interface AddFromCatalogModalProps {
+  allTemplates: SubscriptionTemplate[]
+  connected: BranchSubscriptionTemplate[]
+  onConnect: (tpl: SubscriptionTemplate) => Promise<void>
+  onClose: () => void
+}
+
+function AddFromCatalogModal({ allTemplates, connected, onConnect, onClose }: AddFromCatalogModalProps) {
+  const [search,  setSearch]  = useState('')
+  const [loading, setLoading] = useState<string | null>(null)
+
+  const isConnected = (id: string) => connected.some(c => c.template_id === id)
+  const filtered = search.trim()
+    ? allTemplates.filter(t => t.name.toLowerCase().includes(search.toLowerCase()))
+    : allTemplates
+
+  const handleConnect = async (tpl: SubscriptionTemplate) => {
+    setLoading(tpl.id)
+    try { await onConnect(tpl) } finally { setLoading(null) }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 21 }}>
+      <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)' }} />
+      <div style={{ position: 'relative', width: '100%', maxWidth: 520, maxHeight: '80vh', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, boxShadow: '0 24px 64px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '21px 21px 13px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)' }}>Добавить из каталога</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={18} /></button>
+        </div>
+        <div style={{ padding: '13px 21px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 13px', background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8 }}>
+            <Search size={14} color="var(--text-muted)" />
+            <input style={{ flex: 1, background: 'none', border: 'none', color: 'var(--text)', fontSize: 13, outline: 'none' }} placeholder="Поиск..." value={search} onChange={e => setSearch(e.target.value)} />
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: 21, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {filtered.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-muted)', textAlign: 'center', padding: '21px 0' }}>Шаблонов нет</div>}
+          {filtered.map(tpl => {
+            const conn = isConnected(tpl.id)
+            return (
+              <div key={tpl.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 13px', background: conn ? 'color-mix(in srgb, var(--accent) 6%, transparent)' : 'var(--bg-surface)', border: `1px solid ${conn ? 'color-mix(in srgb, var(--accent) 25%, transparent)' : 'var(--border)'}`, borderRadius: 13 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)', marginBottom: 2 }}>{tpl.name}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {typeLabel(tpl.slot_1_type)} · {tpl.slot_1_duration_min} мин · {tpl.slot_1_sessions_total} сеансов
+                    {tpl.slot_2_type && ` + ${typeLabel(tpl.slot_2_type)}`}
+                    {tpl.slot_3_type && ` + ${typeLabel(tpl.slot_3_type)}`}
+                    {tpl.slot_4_type && ` + ${typeLabel(tpl.slot_4_type)}`}
+                    {' · '}{tpl.validity_days} дней
+                    {tpl.price != null && ` · ${new Intl.NumberFormat('ru-KZ').format(tpl.price)} ₸`}
+                  </div>
+                </div>
+                {conn ? (
+                  <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, background: 'color-mix(in srgb, var(--accent) 12%, transparent)', color: 'var(--accent)', border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)' }}>✓ Подключён</span>
+                ) : (
+                  <button onClick={() => void handleConnect(tpl)} disabled={loading === tpl.id}
+                    style={{ display: 'flex', alignItems: 'center', gap: 5, height: 30, padding: '0 12px', background: 'var(--accent)', border: 'none', borderRadius: 8, color: 'var(--accent-fg)', fontSize: 12, fontWeight: 600, cursor: loading === tpl.id ? 'wait' : 'pointer', opacity: loading === tpl.id ? 0.6 : 1 }}>
+                    <Link size={12} />{loading === tpl.id ? '...' : 'Добавить'}
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── SubscriptionsPage ────────────────────────────────────────────────────────
+
+type PageTab = 'branch' | 'sold'
+interface CtxMenu { x: number; y: number; tpl: SubscriptionTemplate }
+
+export default function SubscriptionsPage() {
+  const { user } = useAuth()
+  const isDeveloperOrOwner = user?.role === 'developer' || user?.role === 'owner'
+  const [tab, setTab]               = useState<PageTab>('branch')
+
+  // Branch templates
+  const [allTemplates, setAllTemplates]   = useState<SubscriptionTemplate[]>([])
+  const [connected,    setConnected]      = useState<BranchSubscriptionTemplate[]>([])
+  const [loadingBranch, setLoadingBranch] = useState(true)
+  const [branchError,  setBranchError]    = useState<string | null>(null)
+  const [showCatalog,  setShowCatalog]    = useState(false)
+  const [ctxMenu,      setCtxMenu]        = useState<CtxMenu | null>(null)
+  const [viewTpl,      setViewTpl]        = useState<SubscriptionTemplate | null>(null)
+
+  // Sold subscriptions
+  const [sold,         setSold]         = useState<Subscription[]>([])
+  const [loadingSold,  setLoadingSold]  = useState(false)
+  const [soldError,    setSoldError]    = useState<string | null>(null)
+  const [search,       setSearch]       = useState('')
+  const { period, customFrom, customTo, dateFromStr, dateToStr, setPeriod, remember, setRemember } = usePeriodFilter('subscriptions')
+
+  const loadSold = useCallback(async () => {
+    setLoadingSold(true); setSoldError(null)
+    subscriptionsApi.getAll()
+      .then(data => setSold(data))
+      .catch(e => setSoldError(getServerError(e) ?? 'Ошибка загрузки'))
+      .finally(() => setLoadingSold(false))
+  }, [])
+
+  useEffect(() => {
+    const load = async () => {
+      setLoadingBranch(true); setBranchError(null)
+      try {
+        const [tpls, conn] = await Promise.all([subscriptionTemplatesApi.getAll(), branchSubscriptionTemplatesApi.getAll()])
+        setAllTemplates(tpls)
+        setConnected(conn)
+      } catch (e: unknown) {
+        setBranchError(getServerError(e) ?? 'Не удалось загрузить данные')
+      } finally { setLoadingBranch(false) }
+    }
+    void load()
+  }, [])
+
+  useEffect(() => {
+    if (tab === 'sold') void loadSold()
+  }, [tab, loadSold])
+
+  const connectedTemplates = connected
+    .map(c => c.subscription_templates)
+    .filter((t): t is SubscriptionTemplate => Boolean(t))
+
+  const handleConnect = async (tpl: SubscriptionTemplate) => {
+    const created = await branchSubscriptionTemplatesApi.connect(tpl.id)
+    setConnected(prev => [...prev, { ...created, subscription_templates: tpl }])
+  }
+
+  const handleDisconnect = async (tplId: string) => {
+    const rec = connected.find(c => c.template_id === tplId)
+    if (!rec) return
+    await branchSubscriptionTemplatesApi.disconnect(rec.id)
+    setConnected(prev => prev.filter(c => c.id !== rec.id))
+  }
+
+  const handleToggleActive = async (tpl: SubscriptionTemplate) => {
+    try {
+      const updated = await subscriptionTemplatesApi.update(tpl.id, { is_active: !tpl.is_active })
+      setAllTemplates(prev => prev.map(t => t.id === updated.id ? updated : t))
+    } catch { /* ignore */ }
+  }
+
+  const buildCtxItems = (tpl: SubscriptionTemplate): ContextMenuEntry[] => {
+    const conn = connected.some(c => c.template_id === tpl.id)
+    return [
+      { label: 'Открыть карточку', icon: <Eye size={13} />, onClick: () => setViewTpl(tpl) },
+      conn
+        ? { label: 'Убрать из филиала', icon: <Unlink size={13} />, onClick: () => void handleDisconnect(tpl.id) }
+        : { label: 'Добавить в филиал', icon: <Link size={13} />, onClick: async () => { try { await handleConnect(tpl) } catch { /* */ } } },
+      { separator: true },
+      { label: tpl.is_active ? 'Деактивировать' : 'Активировать', icon: tpl.is_active ? <ToggleLeft size={13} /> : <ToggleRight size={13} />, onClick: () => void handleToggleActive(tpl) },
+    ]
+  }
+
+  const filteredSold = search.trim()
+    ? sold.filter(s => s.name?.toLowerCase().includes(search.toLowerCase()) || s.clients?.full_name?.toLowerCase().includes(search.toLowerCase()))
+    : sold
+
+  const TABS = [
+    { id: 'branch' as PageTab, label: 'Доступные абонементы' },
+    { id: 'sold'   as PageTab, label: 'Проданные абонементы' },
+  ]
+
+  return (
+    <div>
+      <PageHeader
+        title="Абонементы"
+        subtitle={`${connected.length} подключено к филиалу · ${allTemplates.length} в каталоге`}
+        actions={<>
+          {tab === 'sold' && (
+            <PeriodFilter
+              period={period}
+              customFrom={customFrom}
+              customTo={customTo}
+              remember={remember}
+              onChange={setPeriod}
+              onRememberChange={setRemember}
+            />
+          )}
+          {tab === 'branch' && (
+            <button onClick={() => setShowCatalog(true)} className="btn btn-primary" style={{ gap: 6 }}>
+              <Plus size={15} strokeWidth={2} />Добавить из каталога
+            </button>
+          )}
+        </>}
+      />
+
+      {/* Tabs */}
+      <div style={{
+        display: 'flex', gap: 2, marginBottom: 20,
+        padding: 4, background: 'var(--bg-card)', border: '1px solid var(--border)',
+        borderRadius: 10, width: 'fit-content',
+      }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)}
+            style={{
+              padding: '7px 18px', borderRadius: 7,
+              background: tab === t.id ? 'var(--bg)' : 'transparent',
+              border: tab === t.id ? '1px solid var(--border)' : '1px solid transparent',
+              boxShadow: tab === t.id ? 'var(--shadow-xs)' : 'none',
+              cursor: 'pointer', fontSize: 12, fontWeight: tab === t.id ? 600 : 400,
+              color: tab === t.id ? 'var(--text)' : 'var(--text-muted)',
+              transition: 'all 150ms ease-out',
+            }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Branch templates tab */}
+      {tab === 'branch' && (
+        <>
+          {branchError && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}>
+              <AlertCircle size={13} />{branchError}
+            </div>
+          )}
+          {loadingBranch ? (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 13 }}>
+              {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-36 rounded-xl" />)}
+            </div>
+          ) : connectedTemplates.length === 0 ? (
+            <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, padding: 55, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+              <div style={{ width: 56, height: 56, borderRadius: 16, background: 'color-mix(in srgb, var(--accent) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 15%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 13 }}>
+                <CreditCard size={24} strokeWidth={1.5} color="var(--accent)" />
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text)', marginBottom: 8 }}>Абонементов нет</div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', maxWidth: 300, lineHeight: 1.6 }}>
+                Нажмите «Добавить из каталога» чтобы подключить шаблоны к этому филиалу
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 13 }}>
+              {connectedTemplates.map(tpl => (
+                <div
+                  key={tpl.id}
+                  onClick={() => setViewTpl(tpl)}
+                  onContextMenu={e => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, tpl }) }}
+                  style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 13, padding: 18, cursor: 'pointer', opacity: tpl.is_active ? 1 : 0.55, display: 'flex', flexDirection: 'column', gap: 12, transition: 'border-color 150ms ease-out' }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', lineHeight: 1.3, marginBottom: 3 }}>{tpl.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{tpl.validity_days} дней</div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                      {!tpl.is_active && <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'rgba(113,113,122,0.15)', color: 'var(--text-muted)', border: '1px solid rgba(113,113,122,0.25)' }}>Неактивен</span>}
+                      {isDeveloperOrOwner && (
+                        <button onClick={e => { e.stopPropagation(); void handleDisconnect(tpl.id) }}
+                          style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, borderRadius: 6, border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)', background: 'transparent', color: 'var(--color-danger)', cursor: 'pointer' }}
+                          title="Убрать из филиала">
+                          <Unlink size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                    {[
+                      { type: tpl.slot_1_type, sessions: tpl.slot_1_sessions_total, duration: tpl.slot_1_duration_min },
+                      tpl.slot_2_type && tpl.slot_2_sessions_total ? { type: tpl.slot_2_type, sessions: tpl.slot_2_sessions_total, duration: tpl.slot_2_duration_min } : null,
+                      tpl.slot_3_type && tpl.slot_3_sessions_total ? { type: tpl.slot_3_type, sessions: tpl.slot_3_sessions_total, duration: tpl.slot_3_duration_min } : null,
+                      tpl.slot_4_type && tpl.slot_4_sessions_total ? { type: tpl.slot_4_type, sessions: tpl.slot_4_sessions_total, duration: tpl.slot_4_duration_min } : null,
+                    ].filter(Boolean).map((slot, i) => slot && (
+                      <span key={i} style={{ fontSize: 10, padding: '2px 7px', borderRadius: 5, background: `color-mix(in srgb, ${typeColor(slot.type)} 10%, transparent)`, color: typeColor(slot.type), border: `1px solid color-mix(in srgb, ${typeColor(slot.type)} 20%, transparent)` }}>
+                        {typeLabel(slot.type)} · {slot.sessions} · {slot.duration}мин
+                      </span>
+                    ))}
+                  </div>
+                  {tpl.price != null && (
+                    <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text)', marginTop: 'auto' }}>
+                      {new Intl.NumberFormat('ru-KZ').format(tpl.price)} ₸
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Sold subscriptions tab */}
+      {tab === 'sold' && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, height: 40, padding: '0 13px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, marginBottom: 13 }}>
+            <Search size={15} color="var(--text-muted)" />
+            <input style={{ flex: 1, background: 'none', border: 'none', color: 'var(--text)', fontSize: 13, outline: 'none' }} placeholder="Поиск по клиенту или названию..." value={search} onChange={e => setSearch(e.target.value)} />
+            {search && <button onClick={() => setSearch('')} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={13} /></button>}
+          </div>
+          {soldError && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}>
+              <AlertCircle size={13} />{soldError}
+            </div>
+          )}
+          {loadingSold ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+              {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-32 rounded-xl" />)}
+            </div>
+          ) : filteredSold.length === 0 ? (
+            <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, padding: 55, textAlign: 'center' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{search ? 'Ничего не найдено' : 'Проданных абонементов нет'}</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {filteredSold.map(sub => {
+                const statusColors: Record<string, string> = { active: 'var(--color-success)', frozen: 'var(--color-warning)', expired: '#71717A', cancelled: 'var(--color-danger)' }
+                const statusLabels: Record<string, string> = { active: 'Активен', frozen: 'Заморожен', expired: 'Истёк', cancelled: 'Отменён' }
+                return (
+                  <div key={sub.id} style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 13, padding: 21 }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{sub.name}</div>
+                        {sub.clients?.full_name && <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{sub.clients.full_name}{sub.clients.phone && ` · ${sub.clients.phone}`}</div>}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {sub.price != null && <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>{new Intl.NumberFormat('ru-KZ').format(sub.price)} ₸</span>}
+                        <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20, background: `${statusColors[sub.status] ?? '#71717A'}18`, color: statusColors[sub.status] ?? '#71717A', border: `1px solid ${statusColors[sub.status] ?? '#71717A'}33` }}>
+                          {statusLabels[sub.status] ?? sub.status}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 13, fontSize: 12, color: 'var(--text-muted)', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <span>{typeLabel(sub.slot_1_type)} · {sub.slot_1_sessions_left}/{sub.slot_1_sessions_total}</span>
+                      {sub.slot_2_type && <span>{typeLabel(sub.slot_2_type!)} · {sub.slot_2_sessions_left}/{sub.slot_2_sessions_total}</span>}
+                      {sub.slot_3_type && <span>{typeLabel(sub.slot_3_type!)} · {sub.slot_3_sessions_left}/{sub.slot_3_sessions_total}</span>}
+                      {sub.slot_4_type && <span>{typeLabel(sub.slot_4_type!)} · {sub.slot_4_sessions_left}/{sub.slot_4_sessions_total}</span>}
+                      <span>С {new Date(sub.date_start).toLocaleDateString('ru-RU')}</span>
+                      {sub.date_end && (
+                        <>
+                          <span>По {new Date(sub.date_end).toLocaleDateString('ru-RU')}</span>
+                          {sub.status === 'active' && (() => {
+                            const countdown = getTimeUntilEnd(sub.date_end)
+                            const cdColor = getCountdownColor(sub.date_end)
+                            const isUrgent = cdColor === 'var(--color-danger)' && countdown !== 'Истёк'
+                            return (
+                              <span style={{
+                                fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 20,
+                                background: `${cdColor}18`, border: `1px solid ${cdColor}44`, color: cdColor,
+                                animation: isUrgent ? 'pulse 1.5s ease-in-out infinite' : undefined,
+                              }}>
+                                {countdown === 'Истёк' ? 'Истёк' : `⏱ ${countdown}`}
+                              </span>
+                            )
+                          })()}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Template detail modal */}
+      {viewTpl && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 21 }}>
+          <div onClick={() => setViewTpl(null)} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)' }} />
+          <div className="modal-animate" style={{ position: 'relative', width: '100%', maxWidth: 460, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, padding: 28, boxShadow: '0 24px 64px rgba(0,0,0,0.5)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+              <div style={{ width: 44, height: 44, borderRadius: 13, background: 'color-mix(in srgb, var(--accent) 12%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 25%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <CreditCard size={20} color="var(--accent)" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>{viewTpl.name}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                  {viewTpl.validity_days} дней{viewTpl.price != null && ` · ${new Intl.NumberFormat('ru-KZ').format(viewTpl.price)} ₸`}
+                </div>
+              </div>
+              <button onClick={() => setViewTpl(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ flex: '1 1 160px', padding: 13, background: 'var(--bg-surface)', borderRadius: 13, border: `1px solid ${typeColor(viewTpl.slot_1_type)}33` }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Слот 1</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: typeColor(viewTpl.slot_1_type) }}>{typeLabel(viewTpl.slot_1_type)}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 3 }}>{viewTpl.slot_1_duration_min} мин · {viewTpl.slot_1_sessions_total} сеансов</div>
+              </div>
+              {viewTpl.slot_2_type && (
+                <div style={{ flex: '1 1 160px', padding: 13, background: 'var(--bg-surface)', borderRadius: 13, border: `1px solid ${typeColor(viewTpl.slot_2_type!)}33` }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Слот 2</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: typeColor(viewTpl.slot_2_type!) }}>{typeLabel(viewTpl.slot_2_type!)}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 3 }}>{viewTpl.slot_2_duration_min} мин · {viewTpl.slot_2_sessions_total} сеансов</div>
+                </div>
+              )}
+              {viewTpl.slot_3_type && (
+                <div style={{ flex: '1 1 160px', padding: 13, background: 'var(--bg-surface)', borderRadius: 13, border: `1px solid ${typeColor(viewTpl.slot_3_type!)}33` }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Слот 3</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: typeColor(viewTpl.slot_3_type!) }}>{typeLabel(viewTpl.slot_3_type!)}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 3 }}>{viewTpl.slot_3_duration_min} мин · {viewTpl.slot_3_sessions_total} сеансов</div>
+                </div>
+              )}
+              {viewTpl.slot_4_type && (
+                <div style={{ flex: '1 1 160px', padding: 13, background: 'var(--bg-surface)', borderRadius: 13, border: `1px solid ${typeColor(viewTpl.slot_4_type!)}33` }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Слот 4</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: typeColor(viewTpl.slot_4_type!) }}>{typeLabel(viewTpl.slot_4_type!)}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 3 }}>{viewTpl.slot_4_duration_min} мин · {viewTpl.slot_4_sessions_total} сеансов</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCatalog && (
+        <AddFromCatalogModal
+          allTemplates={allTemplates}
+          connected={connected}
+          onConnect={handleConnect}
+          onClose={() => setShowCatalog(false)}
+        />
+      )}
+
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          items={buildCtxItems(ctxMenu.tpl)}
+          onClose={() => setCtxMenu(null)}
+        />
+      )}
+    </div>
+  )
+}

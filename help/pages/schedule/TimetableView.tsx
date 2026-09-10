@@ -1,0 +1,1493 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { ChevronLeft, ChevronRight, Plus, Search, X, AlertCircle, Calendar, Trash2, Layers, Lock, Unlock, Eye, Zap, CalendarDays, RefreshCw, Clock, CheckCircle, XCircle } from 'lucide-react'
+import { scheduleSlotsApi, bookingsV2Api, type BookingV2Error, type BookingInfo, type PendingBooking } from '../../api/schedule-slots.api'
+import { PageHeader } from '../../components/layout/PageHeader'
+import { ContextMenu, type ContextMenuEntry } from '../../components/ContextMenu'
+import { devicesApi } from '../../api/devices.api'
+import { clientsApi } from '../../api/clients.api'
+import { subscriptionsApi } from '../../api/subscriptions.api'
+import { useAuth } from '../../hooks/useAuth'
+import type { Device, ScheduleSlot, Client, Subscription, Role } from '../../types'
+import { Skeleton } from '@/components/ui/skeleton'
+
+// ─── constants & helpers ────────────────────────────────────────────────────
+
+const TIME_SLOTS: string[] = []
+for (let h = 7; h <= 21; h++) {
+  TIME_SLOTS.push(`${String(h).padStart(2, '0')}:00`)
+  TIME_SLOTS.push(`${String(h).padStart(2, '0')}:30`)
+}
+
+const SLOT_WIDTH   = 64
+const DEVICE_WIDTH = 160
+const CELL_HEIGHT  = 60
+
+const DURATIONS = [5, 10, 15, 20, 25, 30, 45, 60]
+
+const DEVICE_TYPE_LABELS: Record<string, string> = {
+  vacuactiv: 'VacuActiv', rollshape: 'RollShape', infrastep: 'InfraStep', infrashape: 'InfraShape',
+}
+const DEVICE_TYPE_COLORS: Record<string, string> = {
+  vacuactiv: 'var(--accent)', rollshape: '#263CD9', infrastep: '#8b5cf6', infrashape: 'var(--color-warning)',
+}
+const STATUS_COLORS: Record<string, { bg: string; border: string; text: string }> = {
+  free:            { bg: 'var(--color-success-muted)',  border: 'color-mix(in srgb, var(--color-success) 40%, transparent)',  text: 'var(--color-success)' },
+  booked:          { bg: 'color-mix(in srgb, var(--accent) 18%, transparent)', border: 'color-mix(in srgb, var(--accent) 45%, transparent)', text: 'var(--accent)' },
+  booked_attended: { bg: 'color-mix(in srgb, var(--color-success) 18%, transparent)',  border: 'color-mix(in srgb, var(--color-success) 50%, transparent)',  text: 'var(--color-success)' },
+  booked_missed:   { bg: 'var(--color-danger-muted)',   border: 'color-mix(in srgb, var(--color-danger) 40%, transparent)',   text: 'var(--color-danger)' },
+  blocked:         { bg: 'var(--color-warning-muted)',  border: 'color-mix(in srgb, var(--color-warning) 30%, transparent)',  text: 'var(--color-warning)' },
+  maintenance:     { bg: 'rgba(113,113,122,0.12)', border: 'rgba(113,113,122,0.3)', text: '#71717A' },
+}
+
+function slotColorKey(slot: { status: string; bookings_v2?: { attended: boolean | null } | null }): string {
+  if (slot.status === 'booked') {
+    const att = slot.bookings_v2?.attended
+    if (att === true)  return 'booked_attended'
+    if (att === false) return 'booked_missed'
+  }
+  return slot.status
+}
+const STATUS_LABELS: Record<string, string> = {
+  free: 'Свободно', booked: 'Занято', booked_attended: 'Был', booked_missed: 'Не был',
+  blocked: 'Заблокировано', maintenance: 'Обслуживание',
+}
+
+function ft(t: string) { return t.slice(0, 5) }
+
+function addMinutes(time: string, mins: number): string {
+  const [h, m] = time.split(':').map(Number)
+  const total = h * 60 + m + mins
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`
+}
+
+function toISO(d: Date) { return d.toISOString().slice(0, 10) }
+
+function formatDate(d: Date) {
+  return d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+function cellKey(deviceId: string, time: string): string { return `${deviceId}|${time}` }
+function parseCellKey(key: string): { deviceId: string; time: string } {
+  const i = key.indexOf('|')
+  return { deviceId: key.slice(0, i), time: key.slice(i + 1) }
+}
+
+function currentTimeLeft(): number | null {
+  const now = new Date()
+  const mins = now.getHours() * 60 + now.getMinutes()
+  const startMins = 7 * 60
+  const endMins   = 22 * 60
+  if (mins < startMins || mins > endMins) return null
+  return DEVICE_WIDTH + (mins - startMins) * (SLOT_WIDTH / 30)
+}
+
+const inputStyle: React.CSSProperties = {
+  height: 36, padding: '0 13px', background: 'var(--bg-card)',
+  border: '1px solid var(--border)', borderRadius: 8,
+  color: 'var(--text)', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box',
+  transition: 'border-color 150ms ease-out, box-shadow 150ms ease-out',
+}
+const selectStyle: React.CSSProperties = { ...inputStyle, cursor: 'pointer' }
+
+// ─── Modal backdrop ───────────────────────────────────────────────────────────
+
+function ModalWrap({ onClose, children, maxWidth = 460 }: { onClose: () => void; children: React.ReactNode; maxWidth?: number }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 21 }}>
+      <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(6px)' }} />
+      <div
+        className="modal-animate"
+        style={{ position: 'relative', width: '100%', maxWidth, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, padding: 28, boxShadow: '0 24px 64px rgba(0,0,0,0.5)' }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function ModalHeader({ title, subtitle, onClose }: { title: string; subtitle?: string; onClose: () => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+      <div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>{title}</div>
+        {subtitle && <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3 }}>{subtitle}</div>}
+      </div>
+      <button onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: 4 }}><X size={18} /></button>
+    </div>
+  )
+}
+
+// ─── ClientSearch ─────────────────────────────────────────────────────────────
+
+interface ClientSearchProps { value: Client | null; onChange: (c: Client | null) => void }
+function ClientSearch({ value, onChange }: ClientSearchProps) {
+  const [q, setQ]       = useState('')
+  const [res, setRes]   = useState<Client[]>([])
+  const [open, setOpen] = useState(false)
+  const timer           = useRef<ReturnType<typeof setTimeout>>()
+  const wrapRef         = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => { if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [])
+
+  const search = (val: string) => {
+    setQ(val); clearTimeout(timer.current)
+    if (!val.trim()) { setRes([]); setOpen(false); return }
+    timer.current = setTimeout(async () => {
+      try { const d = await clientsApi.getAll({ search: val }); setRes(d.data.slice(0, 8)); setOpen(true) } catch { /* */ }
+    }, 300)
+  }
+
+  if (value) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 36, padding: '0 13px', background: 'var(--bg-card)', border: '1px solid var(--accent)', borderRadius: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>{value.full_name}</span>
+        <button onClick={() => onChange(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: 0 }}><X size={13} /></button>
+      </div>
+    )
+  }
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <Search size={13} color="var(--text-muted)" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} />
+      <input style={{ ...inputStyle, paddingLeft: 30 }} placeholder="Поиск клиента..." value={q} onChange={e => search(e.target.value)} onFocus={() => q && setOpen(true)} />
+      {open && res.length > 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 200, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', marginTop: 2, boxShadow: '0 8px 24px rgba(0,0,0,0.3)' }}>
+          {res.map(c => (
+            <button key={c.id} onClick={() => { onChange(c); setQ(''); setOpen(false) }} style={{ display: 'block', width: '100%', padding: '8px 13px', textAlign: 'left', background: 'transparent', border: 'none', cursor: 'pointer', borderBottom: '1px solid var(--border)', color: 'var(--text)', fontSize: 13 }}>
+              {c.full_name}{c.phone && <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8 }}>{c.phone}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── CreateSlotModal ──────────────────────────────────────────────────────────
+
+interface CreateSlotTarget { device: Device; timeStart: string; date: string }
+interface CreateSlotModalProps { target: CreateSlotTarget; onClose: () => void; onCreate: (slot: ScheduleSlot) => void }
+
+function CreateSlotModal({ target, onClose, onCreate }: CreateSlotModalProps) {
+  const [duration, setDuration] = useState(30)
+  const [saving, setSaving]     = useState(false)
+  const [error, setError]       = useState<string | null>(null)
+  const timeEnd = addMinutes(target.timeStart, duration)
+  const devColor = DEVICE_TYPE_COLORS[target.device.type] ?? 'var(--accent)'
+
+  const handleCreate = async () => {
+    setSaving(true); setError(null)
+    try {
+      const slot = await scheduleSlotsApi.create({ device_id: target.device.id, date: target.date, time_start: target.timeStart, time_end: timeEnd })
+      onCreate(slot)
+    } catch (e: unknown) {
+      const code = (e as { response?: { data?: { code?: string } } })?.response?.data?.code
+      setError(code === 'SLOT_EXISTS' ? 'Ячейка на это время уже существует' : 'Не удалось создать ячейку')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <ModalWrap onClose={onClose} maxWidth={400}>
+      <ModalHeader title="Создать ячейку" onClose={onClose} />
+      <div style={{ padding: 13, background: 'var(--bg-surface)', borderRadius: 12, marginBottom: 21, border: `1px solid color-mix(in srgb, ${devColor} 20%, transparent)` }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: devColor }}>{DEVICE_TYPE_LABELS[target.device.type]} #{target.device.number}</div>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>
+          {new Date(target.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })} · {target.timeStart}
+        </div>
+      </div>
+      {error && <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 21, fontSize: 12, color: 'var(--color-danger)' }}><AlertCircle size={13} />{error}</div>}
+      <div style={{ marginBottom: 21 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Длительность</div>
+        <select style={selectStyle} value={duration} onChange={e => setDuration(Number(e.target.value))}>
+          {DURATIONS.map(d => <option key={d} value={d}>{d} мин → до {addMinutes(target.timeStart, d)}</option>)}
+        </select>
+      </div>
+      <div style={{ display: 'flex', gap: 13 }}>
+        <button onClick={() => void handleCreate()} disabled={saving}
+          style={{ flex: 1, height: 40, background: 'var(--accent)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1 }}>
+          {saving ? 'Создание...' : 'Создать'}
+        </button>
+        <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── BulkCreateModal ──────────────────────────────────────────────────────────
+
+interface BulkCreateModalProps {
+  selection: Set<string>
+  devices: Device[]
+  date: string
+  onClose: () => void
+  onCreated: (count: number) => void
+}
+
+function BulkCreateModal({ selection, devices, date, onClose, onCreated }: BulkCreateModalProps) {
+  const [duration, setDuration] = useState(30)
+  const [saving, setSaving]     = useState(false)
+  const [error, setError]       = useState<string | null>(null)
+
+  const deviceMap = useMemo(() => {
+    const m = new Map<string, Device>()
+    for (const d of devices) m.set(d.id, d)
+    return m
+  }, [devices])
+
+  const handleCreate = async () => {
+    setSaving(true); setError(null)
+    try {
+      const slots = Array.from(selection).map(key => {
+        const { deviceId, time } = parseCellKey(key)
+        return { device_id: deviceId, date, time_start: time, time_end: addMinutes(time, duration) }
+      })
+      const result = await scheduleSlotsApi.bulkCreate(slots)
+      onCreated(result.created ?? 0)
+    } catch {
+      setError('Не удалось создать ячейки')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const groupedByDevice = useMemo(() => {
+    const groups = new Map<string, string[]>()
+    for (const key of selection) {
+      const { deviceId, time } = parseCellKey(key)
+      if (!groups.has(deviceId)) groups.set(deviceId, [])
+      groups.get(deviceId)!.push(time)
+    }
+    return groups
+  }, [selection])
+
+  return (
+    <ModalWrap onClose={onClose} maxWidth={440}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: 'rgba(38,60,217,0.12)', border: '1px solid rgba(38,60,217,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Layers size={20} color="#263CD9" />
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Создать {selection.size} ячеек</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>Массовое создание расписания</div>
+        </div>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+      </div>
+
+      <div style={{ marginBottom: 21, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {Array.from(groupedByDevice.entries()).map(([deviceId, times]) => {
+          const dev = deviceMap.get(deviceId)
+          const devColor = dev ? (DEVICE_TYPE_COLORS[dev.type] ?? '#71717A') : '#71717A'
+          const sorted = [...times].sort()
+          return (
+            <div key={deviceId} style={{ padding: '10px 13px', background: 'var(--bg-surface)', borderRadius: 8, border: `1px solid color-mix(in srgb, ${devColor} 13%, transparent)` }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: devColor }}>
+                {dev ? `${DEVICE_TYPE_LABELS[dev.type]} #${dev.number}` : deviceId}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+                {sorted.join(' · ')}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div style={{ marginBottom: 21, paddingTop: 21, borderTop: '1px solid var(--border)' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Длительность каждой ячейки</div>
+        <select style={selectStyle} value={duration} onChange={e => setDuration(Number(e.target.value))}>
+          {DURATIONS.map(d => <option key={d} value={d}>{d} мин</option>)}
+        </select>
+      </div>
+
+      {error && <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}><AlertCircle size={13} />{error}</div>}
+
+      <div style={{ display: 'flex', gap: 13 }}>
+        <button onClick={() => void handleCreate()} disabled={saving}
+          style={{ flex: 1, height: 40, background: 'var(--color-secondary)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1 }}>
+          {saving ? 'Создание...' : `Создать ${selection.size} ячеек`}
+        </button>
+        <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── BookingModal ─────────────────────────────────────────────────────────────
+
+interface BookingModalProps { slot: ScheduleSlot; device: Device; onClose: () => void; onBooked: () => void }
+
+function BookingModal({ slot, device, onClose, onBooked }: BookingModalProps) {
+  const [client,      setClient]      = useState<Client | null>(null)
+  const [subs,        setSubs]        = useState<Subscription[]>([])
+  const [selSub,      setSelSub]      = useState<Subscription | null>(null)
+  const [loading,     setLoading]     = useState(false)
+  const [saving,      setSaving]      = useState(false)
+  const [error,       setError]       = useState<string | null>(null)
+  const [trialDate,   setTrialDate]   = useState(slot.date)
+  const [trialTime,   setTrialTime]   = useState(slot.time_start)
+  const [trialAvail,  setTrialAvail]  = useState<Record<string, boolean> | null>(null)
+  const [checkingAvail, setCheckingAvail] = useState(false)
+  const [singleSlot,  setSingleSlot]  = useState(false)
+  const devColor = DEVICE_TYPE_COLORS[device.type] ?? 'var(--accent)'
+
+  useEffect(() => {
+    if (!client) { setSubs([]); setSelSub(null); return }
+    setLoading(true)
+    subscriptionsApi.getAll({ client_id: client.id, status: 'active' })
+      .then(data => { setSubs(data); setSelSub(data[0] ?? null) })
+      .catch(() => setError('Не удалось загрузить абонементы'))
+      .finally(() => setLoading(false))
+  }, [client])
+
+  useEffect(() => { setTrialAvail(null) }, [trialDate, trialTime, selSub])
+  useEffect(() => { setSingleSlot(false) }, [selSub])
+
+  const checkTrialAvail = async () => {
+    if (!selSub) return
+    setCheckingAvail(true); setError(null)
+    try {
+      const slots = await scheduleSlotsApi.getByDate(trialDate)
+      const atTime = slots.filter(s => s.time_start === trialTime && s.status === 'free')
+      const slotTypes = [
+        selSub.slot_1_type,
+        selSub.slot_2_type,
+        selSub.slot_3_type,
+        selSub.slot_4_type,
+      ].filter(Boolean) as string[]
+      const avail: Record<string, boolean> = {}
+      for (const t of slotTypes) {
+        avail[t] = atTime.some(s => (s.devices as { type: string } | null)?.type === t)
+      }
+      setTrialAvail(avail)
+    } catch { setError('Не удалось проверить доступность') }
+    finally { setCheckingAvail(false) }
+  }
+
+  const allTrialFree = trialAvail !== null && Object.values(trialAvail).every(Boolean)
+
+  const handleBook = async () => {
+    if (!client || !selSub) { setError('Выберите клиента и абонемент'); return }
+    setSaving(true); setError(null)
+    try {
+      if (selSub.is_trial) {
+        await bookingsV2Api.trialBook({ subscription_id: selSub.id, date: trialDate, time_start: trialTime })
+      } else {
+        await bookingsV2Api.create({
+          client_id: client.id,
+          subscription_id: selSub.id,
+          slot_1_schedule_slot_id: slot.id,
+          date: slot.date,
+          ...(singleSlot && selSub.slot_2_type ? { single_slot_index: 1 } : {}),
+        })
+      }
+      onBooked()
+    } catch (e: unknown) {
+      const resp = (e as { response?: { data?: BookingV2Error } })?.response?.data
+      if (resp?.code === 'NO_SLOT2') {
+        const nxt = resp.next_available
+        const hint = nxt ? ` Ближайшее доступное: ${nxt.date} в ${ft(nxt.time_start)}` : ''
+        setError(`Нет свободного слота 2 (${resp.slot_2_type}) сразу после.${hint}`)
+      } else if (resp?.code === 'SLOT_BUSY') {
+        setError(`Слот занят: ${resp.slot_type ? DEVICE_TYPE_LABELS[resp.slot_type] ?? resp.slot_type : 'неизвестный тренажёр'}`)
+      } else {
+        setError(resp?.error ?? 'Ошибка бронирования')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const isTrial = selSub?.is_trial ?? false
+
+  return (
+    <ModalWrap onClose={onClose}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: `color-mix(in srgb, ${devColor} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${devColor} 20%, transparent)`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Calendar size={20} color={devColor} />
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Забронировать</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
+            {isTrial ? 'Тестовое занятие — все 4 тренажёра' : `${DEVICE_TYPE_LABELS[device.type]} #${device.number} · ${ft(slot.time_start)} — ${ft(slot.time_end)}`}
+          </div>
+        </div>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+      </div>
+
+      {error && <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 21, fontSize: 12, color: 'var(--color-danger)', lineHeight: 1.5 }}><AlertCircle size={13} style={{ flexShrink: 0, marginTop: 1 }} />{error}</div>}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 21 }}>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Клиент</div>
+          <ClientSearch value={client} onChange={c => { setClient(c); setError(null) }} />
+        </div>
+        {client && (
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Абонемент</div>
+            {loading ? (
+              <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Загрузка...</div>
+            ) : subs.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--color-warning)' }}>Нет активных абонементов</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {subs.map(s => (
+                  <button key={s.id} onClick={() => setSelSub(s)} style={{ padding: '10px 13px', background: selSub?.id === s.id ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'var(--bg-surface)', border: `1px solid ${selSub?.id === s.id ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', textAlign: 'left', transition: 'background 150ms ease-out, border-color 150ms ease-out' }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)', marginBottom: 4 }}>
+                      {s.name}
+                      {s.is_trial && <span style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', borderRadius: 4, background: 'var(--color-warning-muted)', color: 'var(--color-warning)', border: '1px solid color-mix(in srgb, var(--color-warning) 30%, transparent)', fontWeight: 600 }}>ТЕСТ</span>}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 11, color: DEVICE_TYPE_COLORS[s.slot_1_type] }}>{DEVICE_TYPE_LABELS[s.slot_1_type]}: {s.slot_1_sessions_left}/{s.slot_1_sessions_total}</span>
+                      {s.slot_2_type && s.slot_2_sessions_left !== null && (
+                        <span style={{ fontSize: 11, color: DEVICE_TYPE_COLORS[s.slot_2_type] }}>+ {DEVICE_TYPE_LABELS[s.slot_2_type]}: {s.slot_2_sessions_left}/{s.slot_2_sessions_total}</span>
+                      )}
+                      {s.slot_3_type && s.slot_3_sessions_left !== null && (
+                        <span style={{ fontSize: 11, color: DEVICE_TYPE_COLORS[s.slot_3_type] }}>+ {DEVICE_TYPE_LABELS[s.slot_3_type]}: {s.slot_3_sessions_left}/{s.slot_3_sessions_total}</span>
+                      )}
+                      {s.slot_4_type && s.slot_4_sessions_left !== null && (
+                        <span style={{ fontSize: 11, color: DEVICE_TYPE_COLORS[s.slot_4_type] }}>+ {DEVICE_TYPE_LABELS[s.slot_4_type]}: {s.slot_4_sessions_left}/{s.slot_4_sessions_total}</span>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {selSub && !isTrial && selSub.slot_2_type && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Тип визита</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button type="button" onClick={() => setSingleSlot(false)}
+                style={{ flex: 1, height: 36, padding: '0 13px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: !singleSlot ? 600 : 400, background: !singleSlot ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'transparent', border: `1px solid ${!singleSlot ? 'var(--accent)' : 'var(--border)'}`, color: !singleSlot ? 'var(--accent)' : 'var(--text-muted)', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+                Полный сеанс
+              </button>
+              <button type="button" onClick={() => setSingleSlot(true)}
+                style={{ flex: 1, height: 36, padding: '0 13px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: singleSlot ? 600 : 400, background: singleSlot ? 'color-mix(in srgb, var(--accent) 10%, transparent)' : 'transparent', border: `1px solid ${singleSlot ? 'var(--accent)' : 'var(--border)'}`, color: singleSlot ? 'var(--accent)' : 'var(--text-muted)', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+                Одиночное посещение
+              </button>
+            </div>
+            {!singleSlot ? (
+              <div style={{ padding: '8px 12px', background: 'color-mix(in srgb, var(--accent) 6%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)', borderRadius: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+                Слот 2 ({DEVICE_TYPE_LABELS[selSub.slot_2_type]}) подберётся автоматически.
+              </div>
+            ) : (
+              <div style={{ padding: '8px 12px', background: 'color-mix(in srgb, var(--color-info) 6%, transparent)', border: '1px solid color-mix(in srgb, var(--color-info) 20%, transparent)', borderRadius: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+                Будет использован только {DEVICE_TYPE_LABELS[device.type]}. Засчитывается 1 сеанс из слота 1.
+              </div>
+            )}
+          </div>
+        )}
+
+        {selSub && isTrial && (
+          <div style={{ padding: 13, background: 'color-mix(in srgb, var(--color-warning) 6%, transparent)', border: '1px solid color-mix(in srgb, var(--color-warning) 25%, transparent)', borderRadius: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-warning)', marginBottom: 13 }}>Тестовое занятие — выберите дату и время</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 13 }}>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Дата</div>
+                <input type="date" style={inputStyle} value={trialDate} onChange={e => setTrialDate(e.target.value)} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Время начала</div>
+                <input type="time" step="1800" style={inputStyle} value={trialTime} onChange={e => setTrialTime(e.target.value)} />
+              </div>
+            </div>
+            <button onClick={() => void checkTrialAvail()} disabled={checkingAvail} style={{ height: 32, padding: '0 13px', background: 'transparent', border: '1px solid color-mix(in srgb, var(--color-warning) 40%, transparent)', borderRadius: 8, color: 'var(--color-warning)', fontSize: 12, cursor: checkingAvail ? 'not-allowed' : 'pointer', opacity: checkingAvail ? 0.5 : 1, marginBottom: trialAvail !== null ? 13 : 0 }}>
+              {checkingAvail ? 'Проверка...' : 'Проверить доступность'}
+            </button>
+            {trialAvail !== null && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                {Object.entries(trialAvail).map(([type, free]) => (
+                  <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: free ? 'var(--color-success)' : 'var(--color-danger)', flexShrink: 0 }} />
+                    <span style={{ color: DEVICE_TYPE_COLORS[type] ?? 'var(--text)', fontWeight: 500 }}>{DEVICE_TYPE_LABELS[type] ?? type}</span>
+                    <span style={{ color: free ? 'var(--color-success)' : 'var(--color-danger)' }}>{free ? 'Свободен' : 'Занят'}</span>
+                  </div>
+                ))}
+                {!allTrialFree && <div style={{ fontSize: 11, color: 'var(--color-danger)', marginTop: 4 }}>Не все тренажёры свободны в это время</div>}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 13, paddingTop: 21, borderTop: '1px solid var(--border)' }}>
+          <button
+            onClick={() => void handleBook()}
+            disabled={saving || !client || !selSub || (isTrial && !allTrialFree)}
+            style={{ flex: 1, height: 40, background: 'var(--accent)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: (saving || !client || !selSub || (isTrial && !allTrialFree)) ? 'not-allowed' : 'pointer', opacity: (saving || !client || !selSub || (isTrial && !allTrialFree)) ? 0.5 : 1 }}>
+            {saving ? 'Бронирование...' : isTrial ? 'Забронировать тестовое занятие' : 'Подтвердить бронь'}
+          </button>
+          <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+        </div>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── BookingInfoModal ─────────────────────────────────────────────────────────
+
+interface BookingInfoModalProps { slot: ScheduleSlot; device: Device; userRole: Role; onClose: () => void; onCancelled: () => void; onReschedule?: (info: BookingInfo) => void }
+
+function BookingInfoModal({ slot, device, userRole, onClose, onCancelled, onReschedule }: BookingInfoModalProps) {
+  const [info,       setInfo]       = useState<BookingInfo | null>(null)
+  const [loading,    setLoading]    = useState(true)
+  const [cancelling, setCancelling] = useState(false)
+  const [marking,    setMarking]    = useState(false)
+  const [attended,   setAttended]   = useState<boolean | null>(null)
+  const [error,      setError]      = useState<string | null>(null)
+  const devColor = DEVICE_TYPE_COLORS[device.type] ?? 'var(--accent)'
+
+  useEffect(() => {
+    if (!slot.booking_id) { setLoading(false); return }
+    bookingsV2Api.getById(slot.booking_id)
+      .then(d => { setInfo(d); setAttended(d.booking.attended) })
+      .catch(() => setError('Не удалось загрузить данные брони'))
+      .finally(() => setLoading(false))
+  }, [slot.booking_id])
+
+  const handleMarkAttended = async (val: boolean | null) => {
+    if (!info) return
+    setMarking(true)
+    try {
+      const updated = await bookingsV2Api.markAttended(info.booking.id, val)
+      setAttended(updated.attended)
+    } catch { /* ignore */ } finally { setMarking(false) }
+  }
+
+  const handleCancel = async () => {
+    if (!info) return
+    setCancelling(true); setError(null)
+    try {
+      await bookingsV2Api.cancel(info.booking.id)
+      onCancelled()
+    } catch {
+      setError('Ошибка при снятии брони')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  let canCancel = false
+  let cancelHint: string | null = null
+  if (info) {
+    const slotStart = new Date(`${info.slot_1.date}T${info.slot_1.time_start}`)
+    const hoursLeft = (slotStart.getTime() - Date.now()) / (1000 * 60 * 60)
+    if (hoursLeft < 24) {
+      canCancel = ['developer', 'owner', 'franchisee'].includes(userRole)
+      if (!canCancel) cancelHint = 'До сеанса менее 24 ч — снять бронь может только управляющий'
+    } else {
+      canCancel = ['developer', 'owner', 'franchisee', 'admin', 'staff'].includes(userRole)
+    }
+  }
+
+  return (
+    <ModalWrap onClose={onClose}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: 'color-mix(in srgb, var(--accent) 10%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Calendar size={20} color="var(--accent)" />
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Информация о брони</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>
+            {info ? `${info.client.full_name} · ${new Date(info.slot_1.date).toLocaleDateString('ru-RU')}` : `${DEVICE_TYPE_LABELS[device.type]} #${device.number} · ${ft(slot.time_start)}`}
+          </div>
+        </div>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: '34px 0', textAlign: 'center', fontSize: 13, color: 'var(--text-muted)' }}>Загрузка...</div>
+      ) : !info ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, fontSize: 12, color: 'var(--color-danger)' }}>
+          <AlertCircle size={13} />{error ?? 'Данные о брони не найдены'}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 21 }}>
+            <div style={{ padding: 13, background: 'var(--bg-surface)', borderRadius: 12, gridColumn: '1 / -1' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Клиент</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{info.client.full_name}</div>
+              {info.client.phone && <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3 }}>{info.client.phone}</div>}
+            </div>
+            <div style={{ padding: 13, background: 'var(--bg-surface)', borderRadius: 12, gridColumn: '1 / -1' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 5 }}>Абонемент</div>
+              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text)' }}>{info.subscription.name}</div>
+            </div>
+            {([info.slot_1, info.slot_2, info.slot_3, info.slot_4] as Array<typeof info.slot_1 | null>).map((s, i) => {
+              if (!s) return null
+              const dev = s.devices
+              const dColor = dev ? (DEVICE_TYPE_COLORS[dev.type] ?? '#71717A') : '#71717A'
+              return (
+                <div key={i} style={{ padding: 13, background: 'var(--bg-surface)', borderRadius: 12, border: `1px solid color-mix(in srgb, ${dColor} 13%, transparent)` }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Слот {i + 1}</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: dColor }}>{dev ? `${DEVICE_TYPE_LABELS[dev.type]} #${dev.number}` : '—'}</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>{ft(s.time_start)} — {ft(s.time_end)}</div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 13, padding: '10px 13px', background: 'var(--bg-surface)', borderRadius: 10, border: '1px solid var(--border)' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', flex: 1 }}>Посещение:</span>
+            <button onClick={() => void handleMarkAttended(true)} disabled={marking}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, height: 30, padding: '0 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: attended === true ? 'var(--color-success-muted)' : 'transparent', border: `1px solid ${attended === true ? 'var(--color-success)' : 'var(--border)'}`, color: attended === true ? 'var(--color-success)' : 'var(--text-muted)' }}>
+              ✓ Был
+            </button>
+            <button onClick={() => void handleMarkAttended(false)} disabled={marking}
+              style={{ display: 'flex', alignItems: 'center', gap: 4, height: 30, padding: '0 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: attended === false ? 'var(--color-danger-muted)' : 'transparent', border: `1px solid ${attended === false ? 'var(--color-danger)' : 'var(--border)'}`, color: attended === false ? 'var(--color-danger)' : 'var(--text-muted)' }}>
+              ✗ Не был
+            </button>
+            {attended !== null && (
+              <button onClick={() => void handleMarkAttended(null)} disabled={marking}
+                style={{ height: 30, padding: '0 8px', borderRadius: 6, fontSize: 11, cursor: 'pointer', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-muted)' }}>
+                Сброс
+              </button>
+            )}
+          </div>
+
+          {error && <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}><AlertCircle size={13} />{error}</div>}
+          {cancelHint && <div style={{ padding: '8px 13px', background: 'color-mix(in srgb, var(--color-warning) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-warning) 25%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-warning)' }}>{cancelHint}</div>}
+
+          <div style={{ display: 'flex', gap: 8, paddingTop: 21, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+            {onReschedule && info && (
+              <button onClick={() => { onReschedule(info); onClose() }}
+                style={{ flex: 1, minWidth: 120, height: 40, background: 'rgba(38,60,217,0.10)', border: '1px solid rgba(38,60,217,0.3)', borderRadius: 8, color: '#263CD9', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                <RefreshCw size={13} />Перенести
+              </button>
+            )}
+            <button onClick={() => void handleCancel()} disabled={!canCancel || cancelling} style={{ flex: 1, minWidth: 120, height: 40, background: canCancel ? 'var(--color-danger-muted)' : 'var(--bg-surface)', border: `1px solid ${canCancel ? 'color-mix(in srgb, var(--color-danger) 35%, transparent)' : 'var(--border)'}`, borderRadius: 8, color: canCancel ? 'var(--color-danger)' : 'var(--text-muted)', fontSize: 13, fontWeight: 600, cursor: (!canCancel || cancelling) ? 'not-allowed' : 'pointer', opacity: cancelling ? 0.6 : 1 }}>
+              {cancelling ? 'Снятие...' : 'Снять бронь'}
+            </button>
+            <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Закрыть</button>
+          </div>
+        </>
+      )}
+    </ModalWrap>
+  )
+}
+
+// ─── DeleteConfirmModal ───────────────────────────────────────────────────────
+
+interface DeleteConfirmModalProps { slot: ScheduleSlot; device: Device; loading: boolean; onClose: () => void; onConfirm: () => void }
+
+function DeleteConfirmModal({ slot, device, loading, onClose, onConfirm }: DeleteConfirmModalProps) {
+  const devColor = DEVICE_TYPE_COLORS[device.type] ?? 'var(--accent)'
+  return (
+    <ModalWrap onClose={onClose} maxWidth={380}>
+      <ModalHeader title="Удалить ячейку?" onClose={onClose} />
+      <div style={{ padding: 13, background: 'var(--bg-surface)', borderRadius: 12, marginBottom: 21, border: `1px solid color-mix(in srgb, ${devColor} 20%, transparent)` }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: devColor }}>{DEVICE_TYPE_LABELS[device.type]} #{device.number}</div>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>{ft(slot.time_start)} — {ft(slot.time_end)}</div>
+      </div>
+      <div style={{ display: 'flex', gap: 13 }}>
+        <button onClick={onConfirm} disabled={loading} style={{ flex: 1, height: 40, background: 'var(--color-danger-muted)', border: '1px solid color-mix(in srgb, var(--color-danger) 35%, transparent)', borderRadius: 8, color: 'var(--color-danger)', fontSize: 13, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1 }}>
+          {loading ? 'Удаление...' : 'Удалить'}
+        </button>
+        <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── QuickCreateModal ─────────────────────────────────────────────────────────
+
+type RepeatMode = 'every_day' | 'weekdays' | 'every_n'
+
+const STEP_OPTIONS = [5, 10, 15, 20, 30, 45, 60, 90]
+
+interface QuickCreateModalProps {
+  devices: Device[]
+  onClose: () => void
+  onCreated: (count: number) => void
+}
+
+function QuickCreateModal({ devices, onClose, onCreated }: QuickCreateModalProps) {
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(devices.map(d => d.id)))
+  const [dateStart,   setDateStart]   = useState(() => toISO(new Date()))
+  const [dateEnd,     setDateEnd]     = useState(() => toISO(new Date()))
+  const [dayStart,    setDayStart]    = useState('09:00')
+  const [dayEnd,      setDayEnd]      = useState('22:00')
+  const [step,        setStep]        = useState(30)
+  const [repeat,      setRepeat]      = useState<RepeatMode>('every_day')
+  const [everyN,      setEveryN]      = useState(2)
+  const [slotStatus,  setSlotStatus]  = useState<'free' | 'blocked'>('free')
+  const [saving,      setSaving]      = useState(false)
+  const [error,       setError]       = useState<string | null>(null)
+
+  const toggleDevice = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const generateDates = (): string[] => {
+    const dates: string[] = []
+    const start = new Date(dateStart + 'T00:00:00')
+    const end   = new Date(dateEnd   + 'T00:00:00')
+    let cur = new Date(start), nIdx = 0
+    while (cur <= end) {
+      const dow = cur.getDay()
+      if (repeat === 'every_day') {
+        dates.push(toISO(cur))
+      } else if (repeat === 'weekdays') {
+        if (dow >= 1 && dow <= 5) dates.push(toISO(cur))
+      } else if (repeat === 'every_n') {
+        if (nIdx % everyN === 0) dates.push(toISO(cur))
+        nIdx++
+      }
+      cur = new Date(cur.getTime() + 86400000)
+    }
+    return dates
+  }
+
+  const generateTimeSlots = (): Array<{ time_start: string; time_end: string }> => {
+    const slots: Array<{ time_start: string; time_end: string }> = []
+    const [sh, sm] = dayStart.split(':').map(Number)
+    const [eh, em] = dayEnd.split(':').map(Number)
+    const endMin = eh * 60 + em
+    let cur = sh * 60 + sm
+    while (cur + step <= endMin) {
+      const ts = `${String(Math.floor(cur / 60)).padStart(2, '0')}:${String(cur % 60).padStart(2, '0')}`
+      const te = `${String(Math.floor((cur + step) / 60)).padStart(2, '0')}:${String((cur + step) % 60).padStart(2, '0')}`
+      slots.push({ time_start: ts, time_end: te })
+      cur += step
+    }
+    return slots
+  }
+
+  const dates      = generateDates()
+  const timeSlots  = generateTimeSlots()
+  const totalCells = selectedIds.size * dates.length * timeSlots.length
+
+  const handleCreate = async () => {
+    if (selectedIds.size === 0) { setError('Выберите хотя бы один тренажёр'); return }
+    if (dayStart >= dayEnd) { setError('Начало дня должно быть меньше конца дня'); return }
+    if (dateStart > dateEnd) { setError('Дата начала должна быть ≤ дате конца'); return }
+    if (totalCells === 0) { setError('Нет ячеек для создания'); return }
+
+    setSaving(true); setError(null)
+    try {
+      const slots = Array.from(selectedIds).flatMap(deviceId =>
+        dates.flatMap(date =>
+          timeSlots.map(ts => ({ device_id: deviceId, date, time_start: ts.time_start, time_end: ts.time_end, status: slotStatus }))
+        )
+      )
+      const result = await scheduleSlotsApi.bulkCreate(slots)
+      onCreated((result as unknown as { created: number }).created ?? slots.length)
+    } catch {
+      setError('Не удалось создать ячейки')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <ModalWrap onClose={onClose} maxWidth={520}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: 'color-mix(in srgb, var(--accent) 12%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 25%, transparent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Zap size={20} color="var(--accent)" />
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Быстрое создание</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>Массовое расписание по диапазону дат</div>
+        </div>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+      </div>
+
+      {error && <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}><AlertCircle size={13} />{error}</div>}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.8 }}>Тренажёры</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={() => setSelectedIds(new Set(devices.map(d => d.id)))}
+                style={{ fontSize: 11, height: 24, padding: '0 8px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}>Все</button>
+              <button onClick={() => setSelectedIds(new Set())}
+                style={{ fontSize: 11, height: 24, padding: '0 8px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-secondary)', cursor: 'pointer' }}>Снять</button>
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxHeight: 180, overflowY: 'auto' }}>
+            {devices.map(d => {
+              const checked = selectedIds.has(d.id)
+              const color = DEVICE_TYPE_COLORS[d.type] ?? 'var(--accent)'
+              return (
+                <label key={d.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', background: checked ? `color-mix(in srgb, ${color} 5%, transparent)` : 'var(--bg-card)', border: `1px solid ${checked ? `color-mix(in srgb, ${color} 27%, transparent)` : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={checked} onChange={() => toggleDevice(d.id)} style={{ accentColor: color, width: 14, height: 14 }} />
+                  <span style={{ fontSize: 13, color: 'var(--text)', flex: 1 }}>{DEVICE_TYPE_LABELS[d.type]} #{d.number}</span>
+                  <span style={{ fontSize: 11, padding: '2px 7px', borderRadius: 4, background: `color-mix(in srgb, ${color} 10%, transparent)`, color, border: `1px solid color-mix(in srgb, ${color} 20%, transparent)` }}>Гр. {d.device_group}</span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Дата начала</div>
+            <input type="date" style={inputStyle} value={dateStart} onChange={e => setDateStart(e.target.value)} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Дата конца</div>
+            <input type="date" style={inputStyle} value={dateEnd} onChange={e => setDateEnd(e.target.value)} />
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Начало дня</div>
+            <input type="time" style={inputStyle} value={dayStart} onChange={e => setDayStart(e.target.value)} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Конец дня</div>
+            <input type="time" style={inputStyle} value={dayEnd} onChange={e => setDayEnd(e.target.value)} />
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Шаг брони (мин)</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {STEP_OPTIONS.map(s => (
+              <button key={s} onClick={() => setStep(s)}
+                style={{ flex: 1, height: 32, background: step === s ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent', border: `1px solid ${step === s ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 8, color: step === s ? 'var(--accent)' : 'var(--text-secondary)', fontSize: 12, fontWeight: step === s ? 600 : 400, cursor: 'pointer', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Дни недели</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {([
+              { value: 'every_day', label: 'Каждый день' },
+              { value: 'weekdays',  label: 'Будние' },
+              { value: 'every_n',   label: 'Каждые N' },
+            ] as { value: RepeatMode; label: string }[]).map(opt => (
+              <button key={opt.value} onClick={() => setRepeat(opt.value)}
+                style={{ flex: 1, height: 32, background: repeat === opt.value ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent', border: `1px solid ${repeat === opt.value ? 'var(--accent)' : 'var(--border)'}`, borderRadius: 8, color: repeat === opt.value ? 'var(--accent)' : 'var(--text-secondary)', fontSize: 12, fontWeight: repeat === opt.value ? 600 : 400, cursor: 'pointer', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {repeat === 'every_n' && (
+            <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Каждые</span>
+              <input type="number" min={2} max={30} style={{ ...inputStyle, width: 60 }} value={everyN} onChange={e => setEveryN(Math.max(2, Number(e.target.value)))} />
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>дней</span>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Тип ячеек</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={() => setSlotStatus('free')}
+              style={{ flex: 1, height: 32, background: slotStatus === 'free' ? 'var(--color-success-muted)' : 'transparent', border: `1px solid ${slotStatus === 'free' ? 'var(--color-success)' : 'var(--border)'}`, borderRadius: 8, color: slotStatus === 'free' ? 'var(--color-success)' : 'var(--text-secondary)', fontSize: 12, fontWeight: slotStatus === 'free' ? 600 : 400, cursor: 'pointer', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+              Свободные
+            </button>
+            <button onClick={() => setSlotStatus('blocked')}
+              style={{ flex: 1, height: 32, background: slotStatus === 'blocked' ? 'var(--color-warning-muted)' : 'transparent', border: `1px solid ${slotStatus === 'blocked' ? 'var(--color-warning)' : 'var(--border)'}`, borderRadius: 8, color: slotStatus === 'blocked' ? 'var(--color-warning)' : 'var(--text-secondary)', fontSize: 12, fontWeight: slotStatus === 'blocked' ? 600 : 400, cursor: 'pointer', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+              Заблокированные
+            </button>
+          </div>
+        </div>
+
+        <div style={{ padding: '10px 13px', background: 'color-mix(in srgb, var(--accent) 6%, transparent)', border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)', borderRadius: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
+          Будет создано <strong style={{ color: 'var(--accent)' }}>{totalCells}</strong> ячеек
+          {' '}для <strong style={{ color: 'var(--accent)' }}>{selectedIds.size}</strong> тренажёров
+          {timeSlots.length > 0 && ` · ${timeSlots.length} слотов/день`}
+          {dates.length > 0 && ` · ${dates.length} дней`}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 13, marginTop: 21, paddingTop: 21, borderTop: '1px solid var(--border)' }}>
+        <button onClick={() => void handleCreate()} disabled={saving || totalCells === 0 || selectedIds.size === 0}
+          style={{ flex: 1, height: 40, background: slotStatus === 'blocked' ? 'var(--color-warning)' : 'var(--accent)', border: 'none', borderRadius: 8, color: '#fff', fontSize: 13, fontWeight: 600, cursor: (saving || totalCells === 0) ? 'not-allowed' : 'pointer', opacity: (saving || totalCells === 0) ? 0.5 : 1 }}>
+          {saving ? 'Создание...' : `Создать ${totalCells} ячеек`}
+        </button>
+        <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── RescheduleModal ──────────────────────────────────────────────────────────
+
+interface RescheduleModalProps {
+  bookingInfo: BookingInfo
+  userRole: string
+  onClose: () => void
+  onRescheduled: () => void
+}
+
+function RescheduleModal({ bookingInfo, userRole, onClose, onRescheduled }: RescheduleModalProps) {
+  const [date,        setDate]        = useState(() => toISO(new Date()))
+  const [freeSlots,   setFreeSlots]   = useState<ScheduleSlot[]>([])
+  const [loadingSlots, setLoadingSlots] = useState(false)
+  const [selectedId,  setSelectedId]  = useState<string | null>(null)
+  const [saving,      setSaving]      = useState(false)
+  const [error,       setError]       = useState<string | null>(null)
+
+  const slot1DeviceType = bookingInfo.slot_1.devices?.type ?? null
+  const origDate = bookingInfo.slot_1.date
+  const hoursLeft = (new Date(`${origDate}T${bookingInfo.slot_1.time_start}`).getTime() - Date.now()) / (1000 * 60 * 60)
+  const isWithin24h = hoursLeft < 24
+  const canReschedule = !isWithin24h || ['developer', 'owner', 'franchisee'].includes(userRole)
+
+  useEffect(() => {
+    setSelectedId(null)
+    setLoadingSlots(true)
+    scheduleSlotsApi.getByDate(date)
+      .then(slots => {
+        const free = slots.filter(s =>
+          s.status === 'free' &&
+          (!slot1DeviceType || s.devices?.type === slot1DeviceType)
+        )
+        setFreeSlots(free)
+      })
+      .catch(() => { /* ignore */ })
+      .finally(() => setLoadingSlots(false))
+  }, [date, slot1DeviceType])
+
+  const handleReschedule = async () => {
+    if (!selectedId) return
+    setSaving(true); setError(null)
+    try {
+      await bookingsV2Api.reschedule(bookingInfo.booking.id, { new_slot_1_id: selectedId })
+      onRescheduled()
+    } catch (e: unknown) {
+      const resp = (e as { response?: { data?: { error?: string; code?: string } } })?.response?.data
+      if (resp?.code === 'NO_SLOT2') setError('Нет свободного слота 2 сразу после выбранного')
+      else if (resp?.code === 'TOO_LATE') setError('Менее 24 ч до сеанса — перенос запрещён для вашей роли')
+      else setError(resp?.error ?? 'Ошибка переноса брони')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <ModalWrap onClose={onClose} maxWidth={460}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 13, marginBottom: 21, paddingBottom: 21, borderBottom: '1px solid var(--border)' }}>
+        <div style={{ width: 44, height: 44, borderRadius: 12, background: 'rgba(38,60,217,0.12)', border: '1px solid rgba(38,60,217,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <RefreshCw size={20} color="#263CD9" />
+        </div>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Перенести бронь</div>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>{bookingInfo.client.full_name}</div>
+        </div>
+        <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 4 }}><X size={18} /></button>
+      </div>
+
+      {isWithin24h && (
+        <div style={{ padding: '8px 13px', background: 'color-mix(in srgb, var(--color-warning) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-warning) 25%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-warning)' }}>
+          ⚠ До сеанса менее 24 ч. {canReschedule ? 'Перенос разрешён для вашей роли.' : 'Перенос запрещён для вашей роли.'}
+        </div>
+      )}
+
+      {error && <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}><AlertCircle size={13} />{error}</div>}
+
+      <div style={{ marginBottom: 13 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Новая дата</div>
+        <input type="date" style={inputStyle} value={date} onChange={e => setDate(e.target.value)} />
+      </div>
+
+      <div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+          Свободные ячейки{slot1DeviceType ? ` (${DEVICE_TYPE_LABELS[slot1DeviceType]})` : ''}
+        </div>
+        {loadingSlots ? (
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '13px 0' }}>Загрузка...</div>
+        ) : freeSlots.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', padding: '13px 0' }}>Нет свободных ячеек на выбранную дату</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 200, overflowY: 'auto' }}>
+            {freeSlots.map(s => {
+              const dev = s.devices
+              const dColor = dev ? (DEVICE_TYPE_COLORS[dev.type] ?? 'var(--accent)') : 'var(--accent)'
+              return (
+                <button key={s.id} onClick={() => setSelectedId(s.id)}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 13px', background: selectedId === s.id ? `color-mix(in srgb, ${dColor} 12%, transparent)` : 'var(--bg-surface)', border: `1px solid ${selectedId === s.id ? dColor : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', transition: 'background 150ms ease-out, border-color 150ms ease-out', textAlign: 'left' }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: selectedId === s.id ? dColor : 'var(--text)' }}>{ft(s.time_start)} — {ft(s.time_end)}</div>
+                    {dev && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{DEVICE_TYPE_LABELS[dev.type]} #{dev.number}</div>}
+                  </div>
+                  {selectedId === s.id && <div style={{ width: 8, height: 8, borderRadius: '50%', background: dColor }} />}
+                </button>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 13, marginTop: 21, paddingTop: 21, borderTop: '1px solid var(--border)' }}>
+        <button
+          onClick={() => void handleReschedule()}
+          disabled={!canReschedule || !selectedId || saving}
+          style={{ flex: 1, height: 40, background: canReschedule && selectedId ? '#263CD9' : 'var(--bg-surface)', border: `1px solid ${canReschedule && selectedId ? '#263CD9' : 'var(--border)'}`, borderRadius: 8, color: canReschedule && selectedId ? '#fff' : 'var(--text-muted)', fontSize: 13, fontWeight: 600, cursor: (!canReschedule || !selectedId || saving) ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1 }}>
+          {saving ? 'Перенос...' : 'Перенести'}
+        </button>
+        <button onClick={onClose} style={{ height: 40, padding: '0 21px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-secondary)', fontSize: 13, cursor: 'pointer' }}>Отмена</button>
+      </div>
+    </ModalWrap>
+  )
+}
+
+// ─── TimetableView ────────────────────────────────────────────────────────────
+
+export default function TimetableView() {
+  const { user } = useAuth()
+  const [date,              setDate]             = useState(() => toISO(new Date()))
+  const [devices,           setDevices]          = useState<Device[]>([])
+  const [slots,             setSlots]            = useState<ScheduleSlot[]>([])
+  const [loading,           setLoading]          = useState(true)
+  const [error,             setError]            = useState<string | null>(null)
+  const [createTarget,      setCreateTarget]     = useState<CreateSlotTarget | null>(null)
+  const [bookTarget,        setBookTarget]       = useState<{ slot: ScheduleSlot; device: Device } | null>(null)
+  const [bookingInfoTarget, setBookingInfoTarget] = useState<{ slot: ScheduleSlot; device: Device } | null>(null)
+  const [deleteConfirm,     setDeleteConfirm]    = useState<{ slot: ScheduleSlot; device: Device } | null>(null)
+  const [deletingSlot,      setDeletingSlot]     = useState(false)
+  const [hoveredCell,       setHoveredCell]      = useState<string | null>(null)
+  const [ctxMenu,           setCtxMenu]          = useState<{ x: number; y: number; device: Device; time: string; slot: ScheduleSlot | null } | null>(null)
+  const [notification,      setNotification]     = useState<string | null>(null)
+  const [dragSelection,     setDragSelection]    = useState<Set<string>>(new Set())
+  const [showBulkModal,     setShowBulkModal]    = useState(false)
+  const [showQuickCreate,   setShowQuickCreate]  = useState(false)
+  const [rescheduleTarget,  setRescheduleTarget] = useState<BookingInfo | null>(null)
+  const [timeLeft,          setTimeLeft]         = useState<number | null>(currentTimeLeft)
+  const [activeTab,         setActiveTab]        = useState<'schedule' | 'pending'>('schedule')
+  const [pendingBookings,   setPendingBookings]  = useState<PendingBooking[]>([])
+  const [pendingLoading,    setPendingLoading]   = useState(false)
+  const [actionId,          setActionId]         = useState<string | null>(null)
+  const notifTimer  = useRef<ReturnType<typeof setTimeout> | undefined>()
+  const isDragging  = useRef(false)
+  const dragMoved   = useRef(false)
+  const isToday     = date === toISO(new Date())
+
+  const canManageSlots     = user?.role === 'developer' || user?.role === 'owner' || user?.role === 'franchisee'
+  const canConfirmBookings = user?.role === 'developer' || user?.role === 'owner' || user?.role === 'franchisee'
+
+  useEffect(() => {
+    const interval = setInterval(() => setTimeLeft(currentTimeLeft()), 60_000)
+    return () => clearInterval(interval)
+  }, [])
+
+  useEffect(() => () => clearTimeout(notifTimer.current), [])
+
+  useEffect(() => {
+    const handleMouseUp = () => {
+      if (!isDragging.current) return
+      isDragging.current = false
+      setDragSelection(prev => {
+        if (dragMoved.current && prev.size > 1) setShowBulkModal(true)
+        dragMoved.current = false
+        return prev
+      })
+    }
+    document.addEventListener('mouseup', handleMouseUp)
+    return () => document.removeEventListener('mouseup', handleMouseUp)
+  }, [])
+
+  const slotMap = useMemo(() => {
+    const m = new Map<string, ScheduleSlot>()
+    for (const s of slots) m.set(cellKey(s.device_id, ft(s.time_start)), s)
+    return m
+  }, [slots])
+
+  const loadData = useCallback(async (d: string) => {
+    setLoading(true); setError(null)
+    try {
+      const [devs, slotList] = await Promise.all([devicesApi.getAll(), scheduleSlotsApi.getByDate(d)])
+      setDevices(devs.filter(dev => dev.status !== 'disabled'))
+      setSlots(slotList)
+    } catch (err) {
+      console.error('[TimetableView] load error:', err)
+      setError('Не удалось загрузить расписание')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const loadPending = useCallback(async () => {
+    if (!canConfirmBookings) return
+    setPendingLoading(true)
+    try {
+      const list = await bookingsV2Api.getPending()
+      setPendingBookings(list)
+    } catch { /* ignore */ }
+    finally { setPendingLoading(false) }
+  }, [canConfirmBookings])
+
+  const handleConfirm = async (id: string) => {
+    setActionId(id)
+    try {
+      await bookingsV2Api.confirm(id)
+      setPendingBookings(prev => prev.filter(b => b.id !== id))
+      showNotification('Бронь подтверждена')
+    } catch { showNotification('Ошибка при подтверждении') }
+    finally { setActionId(null) }
+  }
+
+  const handleReject = async (id: string) => {
+    setActionId(id)
+    try {
+      await bookingsV2Api.reject(id)
+      setPendingBookings(prev => prev.filter(b => b.id !== id))
+      showNotification('Бронь отклонена')
+    } catch { showNotification('Ошибка при отклонении') }
+    finally { setActionId(null) }
+  }
+
+  useEffect(() => { void loadData(date) }, [date, loadData])
+  useEffect(() => { if (canConfirmBookings) void loadPending() }, [canConfirmBookings, loadPending])
+
+  const pendingSlotIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const b of pendingBookings) { if (b.schedule_slots?.id) ids.add(b.schedule_slots.id) }
+    return ids
+  }, [pendingBookings])
+
+  const showNotification = (msg: string) => {
+    setNotification(msg); clearTimeout(notifTimer.current)
+    notifTimer.current = setTimeout(() => setNotification(null), 3000)
+  }
+
+  const prevDay = () => { const d = new Date(date); d.setDate(d.getDate() - 1); setDate(toISO(d)) }
+  const nextDay = () => { const d = new Date(date); d.setDate(d.getDate() + 1); setDate(toISO(d)) }
+
+  const handleCellClick = (device: Device, time: string) => {
+    if (dragMoved.current) return
+    const existing = slotMap.get(cellKey(device.id, time))
+    if (existing) {
+      if (existing.status === 'free') setBookTarget({ slot: existing, device })
+      else if (existing.status === 'booked') setBookingInfoTarget({ slot: existing, device })
+    } else if (canManageSlots) {
+      setCreateTarget({ device, timeStart: time, date })
+    }
+  }
+
+  const handleCellMouseDown = (device: Device, time: string) => {
+    const existing = slotMap.get(cellKey(device.id, time))
+    if (existing || !canManageSlots) return
+    isDragging.current = true; dragMoved.current = false
+    setDragSelection(new Set([cellKey(device.id, time)]))
+  }
+
+  const handleCellMouseEnter = (device: Device, time: string) => {
+    if (!isDragging.current || !canManageSlots) return
+    const existing = slotMap.get(cellKey(device.id, time))
+    if (existing) return
+    dragMoved.current = true
+    setDragSelection(prev => new Set([...prev, cellKey(device.id, time)]))
+  }
+
+  const handleTrashClick = (slot: ScheduleSlot, device: Device) => {
+    if (slot.status === 'booked') { showNotification('Сначала снимите бронь, чтобы удалить ячейку'); return }
+    setDeleteConfirm({ slot, device })
+  }
+
+  const handleDeleteSlot = async () => {
+    if (!deleteConfirm) return
+    setDeletingSlot(true)
+    try {
+      await scheduleSlotsApi.delete(deleteConfirm.slot.id)
+      setSlots(prev => prev.filter(s => s.id !== deleteConfirm.slot.id))
+      setDeleteConfirm(null)
+    } catch { setDeletingSlot(false) }
+  }
+
+  const handleBlockSlot = async (slot: ScheduleSlot) => {
+    const newStatus = slot.status === 'blocked' ? 'free' : 'blocked'
+    try {
+      const updated = await scheduleSlotsApi.patch(slot.id, { status: newStatus })
+      setSlots(prev => prev.map(s => s.id === slot.id ? { ...s, status: updated.status } : s))
+    } catch { showNotification('Не удалось изменить статус ячейки') }
+  }
+
+  const handleCreated  = (slot: ScheduleSlot) => { setSlots(prev => [...prev, slot]); setCreateTarget(null) }
+  const handleBooked   = () => { setBookTarget(null); void loadData(date) }
+  const handleCancelled = () => { setBookingInfoTarget(null); void loadData(date) }
+  const handleBulkCreated = (count: number) => {
+    setShowBulkModal(false); setDragSelection(new Set())
+    showNotification(`Создано ${count} ячеек`); void loadData(date)
+  }
+
+  const dateLabel = new Date(date).toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' })
+  const gridMinWidth = DEVICE_WIDTH + TIME_SLOTS.length * SLOT_WIDTH
+
+  return (
+    <div>
+      <PageHeader
+        title="Расписание"
+        subtitle={dateLabel}
+        actions={<>
+          {canManageSlots && (
+            <button onClick={() => setShowQuickCreate(true)} className="btn btn-secondary" style={{ gap: 6 }}>
+              <Zap size={14} strokeWidth={2} />Быстрое создание
+            </button>
+          )}
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            style={{ height: 32, padding: '0 12px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', color: 'var(--text)', fontSize: 13, cursor: 'pointer', outline: 'none' }} />
+        </>}
+      />
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 13, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: '8px 13px' }}>
+        <button onClick={prevDay} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' }}><ChevronLeft size={14} /></button>
+        <span style={{ flex: 1, textAlign: 'center', fontSize: 13, fontWeight: 500, color: 'var(--text)', textTransform: 'capitalize' }}>{formatDate(new Date(date))}</span>
+        <button onClick={nextDay} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer' }}><ChevronRight size={14} /></button>
+      </div>
+
+      {canConfirmBookings && (
+        <div style={{ display: 'flex', gap: 6, marginBottom: 13 }}>
+          <button onClick={() => setActiveTab('schedule')}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, height: 34, padding: '0 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1px solid ${activeTab === 'schedule' ? 'var(--accent)' : 'var(--border)'}`, background: activeTab === 'schedule' ? 'color-mix(in srgb, var(--accent) 12%, transparent)' : 'transparent', color: activeTab === 'schedule' ? 'var(--accent)' : 'var(--text-secondary)', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+            <CalendarDays size={14} />Расписание
+          </button>
+          <button onClick={() => { setActiveTab('pending'); void loadPending() }}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, height: 34, padding: '0 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', border: `1px solid ${activeTab === 'pending' ? 'var(--color-warning)' : 'var(--border)'}`, background: activeTab === 'pending' ? 'var(--color-warning-muted)' : 'transparent', color: activeTab === 'pending' ? 'var(--color-warning)' : 'var(--text-secondary)', transition: 'background 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out' }}>
+            <Clock size={14} />Ожидают подтверждения
+            {pendingBookings.length > 0 && (
+              <span style={{ minWidth: 18, height: 18, borderRadius: 9, background: 'var(--color-warning)', color: '#fff', fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 5px' }}>
+                {pendingBookings.length}
+              </span>
+            )}
+          </button>
+        </div>
+      )}
+
+      {activeTab === 'schedule' && (
+        <div style={{ display: 'flex', gap: 13, marginBottom: 13, flexWrap: 'wrap' }}>
+          {Object.entries(STATUS_LABELS).map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <div style={{ width: 10, height: 10, borderRadius: 3, background: STATUS_COLORS[k].bg, border: `1px solid ${STATUS_COLORS[k].border}` }} />
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{v}</span>
+            </div>
+          ))}
+          {canManageSlots && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <div style={{ width: 10, height: 10, borderRadius: 3, background: 'rgba(38,60,217,0.15)', border: '1px solid rgba(38,60,217,0.4)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Зажмите и тяните — массовое создание</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {notification && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-warning) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-warning) 25%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-warning)' }}>
+          <AlertCircle size={13} />{notification}
+        </div>
+      )}
+      {error && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 13px', background: 'color-mix(in srgb, var(--color-danger) 8%, transparent)', border: '1px solid color-mix(in srgb, var(--color-danger) 20%, transparent)', borderRadius: 8, marginBottom: 13, fontSize: 12, color: 'var(--color-danger)' }}>
+          <AlertCircle size={13} />{error}
+        </div>
+      )}
+
+      {activeTab === 'pending' ? (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, overflow: 'hidden' }}>
+          {pendingLoading ? (
+            <div style={{ padding: 55, textAlign: 'center', fontSize: 13, color: 'var(--text-muted)' }}>Загрузка...</div>
+          ) : pendingBookings.length === 0 ? (
+            <div style={{ padding: 55, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+              <CheckCircle size={28} strokeWidth={1.5} color="var(--text-muted)" style={{ marginBottom: 13 }} />
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)' }}>Нет заявок, ожидающих подтверждения</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {pendingBookings.map((b, idx) => {
+                const slot = b.schedule_slots
+                const dev = slot?.devices
+                const devColor = dev ? (DEVICE_TYPE_COLORS[dev.type] ?? '#71717A') : '#71717A'
+                const isActing = actionId === b.id
+                return (
+                  <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '14px 21px', borderBottom: idx < pendingBookings.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 3 }}>{b.clients?.full_name ?? '—'}</div>
+                      {b.clients?.phone && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 3 }}>{b.clients.phone}</div>}
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {slot && (
+                          <span style={{ fontSize: 12, color: devColor }}>
+                            {dev ? `${DEVICE_TYPE_LABELS[dev.type]} #${dev.number}` : '—'} · {slot.date} · {ft(slot.time_start)}–{ft(slot.time_end)}
+                          </span>
+                        )}
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          Заявка от {new Date(b.created_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                      <button onClick={() => void handleConfirm(b.id)} disabled={isActing}
+                        style={{ display: 'flex', alignItems: 'center', gap: 5, height: 34, padding: '0 13px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: isActing ? 'not-allowed' : 'pointer', background: 'var(--color-success-muted)', border: '1px solid color-mix(in srgb, var(--color-success) 35%, transparent)', color: 'var(--color-success)', opacity: isActing ? 0.6 : 1 }}>
+                        <CheckCircle size={13} />Подтвердить
+                      </button>
+                      <button onClick={() => void handleReject(b.id)} disabled={isActing}
+                        style={{ display: 'flex', alignItems: 'center', gap: 5, height: 34, padding: '0 13px', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: isActing ? 'not-allowed' : 'pointer', background: 'var(--color-danger-muted)', border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)', color: 'var(--color-danger)', opacity: isActing ? 0.6 : 1 }}>
+                        <XCircle size={13} />Отклонить
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      ) : loading ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <Skeleton className="h-10 rounded-xl mb-1" />
+          {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-16 rounded-xl" />)}
+        </div>
+      ) : !error && devices.length === 0 ? (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, padding: 55, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+          <Calendar size={28} strokeWidth={1.5} color="var(--text-muted)" style={{ marginBottom: 13 }} />
+          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)' }}>Нет активных тренажёров</div>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 6 }}>Добавьте оборудование в Настройках</div>
+        </div>
+      ) : !error ? (
+        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 16, overflow: 'hidden', userSelect: 'none' }}>
+          <div style={{ overflowX: 'auto' }}>
+            <div style={{ minWidth: gridMinWidth, position: 'relative' }}>
+              {isToday && timeLeft !== null && (
+                <div style={{ position: 'absolute', top: 0, bottom: 0, left: timeLeft, width: 2, background: 'var(--accent)', zIndex: 10, pointerEvents: 'none', opacity: 0.9, boxShadow: '0 0 8px color-mix(in srgb, var(--accent) 60%, transparent)' }}>
+                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: 'var(--accent)', position: 'absolute', top: 6, left: -4, boxShadow: '0 0 6px var(--accent)' }} />
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: `${DEVICE_WIDTH}px repeat(${TIME_SLOTS.length}, ${SLOT_WIDTH}px)`, borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, background: 'var(--bg-surface)', zIndex: 5 }}>
+                <div style={{ padding: '10px 13px', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Тренажёр</div>
+                {TIME_SLOTS.map((t, idx) => {
+                  const isHour = t.endsWith(':00')
+                  return (
+                    <div key={t} style={{ padding: '10px 0', textAlign: 'center', fontSize: 10, fontWeight: isHour ? 700 : 400, color: isHour ? 'var(--text-secondary)' : 'var(--text-muted)', borderLeft: '1px solid var(--border)', opacity: idx === 0 ? 1 : 1 }}>
+                      {isHour ? t : <span style={{ opacity: 0.5 }}>{t}</span>}
+                    </div>
+                  )
+                })}
+              </div>
+              {devices.map(device => {
+                const devColor = DEVICE_TYPE_COLORS[device.type] ?? '#71717A'
+                return (
+                  <div key={device.id} style={{ display: 'grid', gridTemplateColumns: `${DEVICE_WIDTH}px repeat(${TIME_SLOTS.length}, ${SLOT_WIDTH}px)`, borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ padding: '10px 13px', display: 'flex', flexDirection: 'column', justifyContent: 'center', borderRight: '1px solid var(--border)', background: 'var(--bg-surface)' }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: devColor }}>{DEVICE_TYPE_LABELS[device.type]}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>#{device.number} · Гр. {device.device_group}</div>
+                    </div>
+                    {TIME_SLOTS.map(time => {
+                      const ck    = cellKey(device.id, time)
+                      const slot  = slotMap.get(ck)
+                      const sc    = slot ? STATUS_COLORS[slotColorKey(slot)] : null
+                      const isHov = hoveredCell === ck
+                      const isSelec = dragSelection.has(ck)
+                      return (
+                        <div
+                          key={time}
+                          className={isSelec ? 'cell-selected' : undefined}
+                          onClick={() => handleCellClick(device, time)}
+                          onContextMenu={e => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, device, time, slot: slot ?? null }) }}
+                          onMouseDown={() => handleCellMouseDown(device, time)}
+                          onMouseEnter={e => {
+                            handleCellMouseEnter(device, time); setHoveredCell(ck)
+                            if (!slot && !isSelec) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)'
+                          }}
+                          onMouseLeave={e => {
+                            setHoveredCell(null)
+                            if (!slot && !isSelec) (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+                          }}
+                          title={slot
+                            ? slot.status === 'booked'
+                              ? `Занято: ${ft(slot.time_start)}–${ft(slot.time_end)}`
+                              : `${STATUS_LABELS[slot.status]}: ${ft(slot.time_start)}–${ft(slot.time_end)}`
+                            : canManageSlots ? `Создать ячейку ${time}` : time}
+                          style={{
+                            height: CELL_HEIGHT,
+                            borderLeft: '1px solid var(--border)',
+                            cursor: slot ? (['free', 'booked'].includes(slot.status) ? 'pointer' : 'default') : canManageSlots ? 'crosshair' : 'default',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            transition: 'background 120ms ease-out',
+                            background: sc ? sc.bg : 'transparent',
+                            position: 'relative',
+                          }}
+                        >
+                          {slot ? (
+                            <>
+                              <div style={{ width: 40, height: 32, borderRadius: 8, background: sc!.bg, border: `1px solid ${sc!.border}`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
+                                {slot.status === 'free'        && <Plus size={12} strokeWidth={2.5} color={sc!.text} />}
+                                {slot.status === 'booked'      && <div style={{ width: 7, height: 7, borderRadius: '50%', background: sc!.text }} />}
+                                {slot.status === 'maintenance' && <span style={{ fontSize: 10, color: sc!.text }}>~</span>}
+                                {slot.status === 'blocked'     && <span style={{ fontSize: 10, color: sc!.text }}>✕</span>}
+                                <span style={{ fontSize: 9, color: sc!.text, opacity: 0.8 }}>{ft(slot.time_start)}</span>
+                              </div>
+                              {slot.status === 'booked' && pendingSlotIds.has(slot.id) && (
+                                <span style={{ position: 'absolute', top: 3, left: 3, fontSize: 10, lineHeight: 1, zIndex: 2 }} title="Ожидает подтверждения">⏳</span>
+                              )}
+                              {isHov && canManageSlots && (
+                                <button onClick={e => { e.stopPropagation(); handleTrashClick(slot, device) }}
+                                  style={{ position: 'absolute', top: 4, right: 4, width: 18, height: 18, background: 'var(--color-danger-muted)', border: '1px solid color-mix(in srgb, var(--color-danger) 30%, transparent)', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', padding: 0, zIndex: 2 }}>
+                                  <Trash2 size={9} color="var(--color-danger)" />
+                                </button>
+                              )}
+                            </>
+                          ) : (
+                            <div style={{ width: 40, height: 32, borderRadius: 8, border: '1px dashed rgba(255,255,255,0.08)', opacity: 0.5, transition: 'opacity 120ms ease-out' }} />
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {dragSelection.size > 0 && !showBulkModal && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '10px 13px', background: 'rgba(38,60,217,0.08)', border: '1px solid rgba(38,60,217,0.25)', borderRadius: 8, marginTop: 8, fontSize: 12, color: '#263CD9' }}>
+          <Layers size={13} />
+          Выбрано {dragSelection.size} ячеек — отпустите мышь для создания
+          <button onClick={() => setDragSelection(new Set())} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#263CD9', cursor: 'pointer', display: 'flex', opacity: 0.7 }}><X size={13} /></button>
+        </div>
+      )}
+
+      {createTarget && <CreateSlotModal target={createTarget} onClose={() => setCreateTarget(null)} onCreate={handleCreated} />}
+      {showBulkModal && <BulkCreateModal selection={dragSelection} devices={devices} date={date} onClose={() => { setShowBulkModal(false); setDragSelection(new Set()) }} onCreated={handleBulkCreated} />}
+      {bookTarget && <BookingModal slot={bookTarget.slot} device={bookTarget.device} onClose={() => setBookTarget(null)} onBooked={handleBooked} />}
+      {bookingInfoTarget && <BookingInfoModal slot={bookingInfoTarget.slot} device={bookingInfoTarget.device} userRole={user?.role ?? 'admin'} onClose={() => setBookingInfoTarget(null)} onCancelled={handleCancelled} onReschedule={info => setRescheduleTarget(info)} />}
+      {deleteConfirm && <DeleteConfirmModal slot={deleteConfirm.slot} device={deleteConfirm.device} loading={deletingSlot} onClose={() => setDeleteConfirm(null)} onConfirm={() => void handleDeleteSlot()} />}
+      {showQuickCreate && <QuickCreateModal devices={devices} onClose={() => setShowQuickCreate(false)} onCreated={count => { setShowQuickCreate(false); showNotification(`Создано ${count} ячеек`); void loadData(date) }} />}
+      {rescheduleTarget && <RescheduleModal bookingInfo={rescheduleTarget} userRole={user?.role ?? 'admin'} onClose={() => setRescheduleTarget(null)} onRescheduled={() => { setRescheduleTarget(null); void loadData(date) }} />}
+
+      {ctxMenu && (() => {
+        const { x, y, device, time, slot } = ctxMenu
+        const items: ContextMenuEntry[] = []
+        if (!slot) {
+          if (canManageSlots) items.push({ label: 'Создать ячейку', icon: <Plus size={13} />, onClick: () => setCreateTarget({ device, timeStart: time, date }) })
+        } else if (slot.status === 'free') {
+          items.push({ label: 'Забронировать', icon: <Calendar size={13} />, onClick: () => setBookTarget({ slot, device }) })
+          if (canManageSlots) {
+            items.push({ separator: true } as ContextMenuEntry)
+            items.push({ label: 'Заблокировать', icon: <Lock size={13} />, onClick: () => void handleBlockSlot(slot) })
+            items.push({ separator: true } as ContextMenuEntry)
+            items.push({ label: 'Удалить ячейку', icon: <Trash2 size={13} />, onClick: () => handleTrashClick(slot, device), danger: true })
+          }
+        } else if (slot.status === 'booked') {
+          items.push({ label: 'Открыть бронь', icon: <Eye size={13} />, onClick: () => setBookingInfoTarget({ slot, device }) })
+        } else if (slot.status === 'blocked' || slot.status === 'maintenance') {
+          if (canManageSlots) {
+            items.push({ label: 'Разблокировать', icon: <Unlock size={13} />, onClick: () => void handleBlockSlot(slot) })
+            items.push({ separator: true } as ContextMenuEntry)
+            items.push({ label: 'Удалить ячейку', icon: <Trash2 size={13} />, onClick: () => handleTrashClick(slot, device), danger: true })
+          }
+        }
+        if (items.length === 0) return null
+        return <ContextMenu x={x} y={y} items={items} onClose={() => setCtxMenu(null)} />
+      })()}
+    </div>
+  )
+}

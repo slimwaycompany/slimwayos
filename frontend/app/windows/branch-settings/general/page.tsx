@@ -12,7 +12,7 @@ export default function GeneralPage() {
   useEffect(() => {
     fetch(`${API}/branch-settings`, { headers: authHeaders() })
       .then((r) => r.ok ? r.json() : {})
-      .then((d) => {
+      .then((d: Record<string, unknown>) => {
         setPlan(d.monthly_sales_plan != null ? String(d.monthly_sales_plan) : '');
       })
       .catch(() => {})

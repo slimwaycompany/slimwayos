@@ -8,6 +8,7 @@ const navItems = [
   { href: '/windows/settings/appearance', label: 'Внешний вид' },
   { href: '/windows/settings/sounds',     label: 'Звуки и уведомления' },
   { href: '/windows/settings/location',   label: 'Локация' },
+  { href: '/windows/settings/security',   label: 'Безопасность' },
 ];
 
 export default function SettingsSidebar() {
