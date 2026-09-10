@@ -44,9 +44,10 @@ export class AuthService {
     };
   }
 
-  async changePassword(userId: string, accessToken: string, dto: ChangePasswordDto) {
-    const userClient = createUserClient(accessToken);
-    const { error } = await userClient.auth.updateUser({ password: dto.new_password });
+  async changePassword(userId: string, dto: ChangePasswordDto) {
+    const { error } = await supabase.auth.admin.updateUserById(userId, {
+      password: dto.new_password,
+    });
     if (error) throw new UnauthorizedException(error.message);
 
     await supabase

@@ -6,7 +6,7 @@ import { clsx } from 'clsx';
 
 const navItems = [
   { href: '/windows/funnel/leads', label: 'Лиды' },
-  { href: '/windows/funnel/sales', label: 'Продажи' },
+  { href: '/windows/funnel/sales', label: 'Касса' },
   { href: '/windows/funnel/clients', label: 'Клиенты' },
   { href: '/windows/funnel/schedule', label: 'Расписание' },
 ];

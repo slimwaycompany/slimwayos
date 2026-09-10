@@ -35,11 +35,9 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   changePassword(
     @CurrentUser() user: Record<string, unknown>,
-    @Headers('authorization') authorization: string,
     @Body() dto: ChangePasswordDto,
   ) {
-    const token = authorization?.replace(/^Bearer\s+/i, '') ?? '';
-    return this.authService.changePassword(user.id as string, token, dto);
+    return this.authService.changePassword(user.id as string, dto);
   }
 
   @Post('employees')
