@@ -8,6 +8,7 @@ import { ProfileModule } from './modules/profile/profile.module';
 import { ShiftsModule } from './modules/shifts/shifts.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { BranchSettingsModule } from './modules/branch-settings/branch-settings.module';
+import { MarketingModule } from './modules/marketing/marketing.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { BranchSettingsModule } from './modules/branch-settings/branch-settings.
     ShiftsModule,
     DashboardModule,
     BranchSettingsModule,
+    MarketingModule,
   ],
   controllers: [AppController],
   providers: [AppService],

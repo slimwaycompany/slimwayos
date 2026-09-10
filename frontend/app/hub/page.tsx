@@ -14,6 +14,7 @@ import {
   GitBranch,
   Terminal,
   LogOut,
+  Megaphone,
 } from 'lucide-react';
 import { clearSession, callLogoutApi } from '@/lib/auth';
 
@@ -27,7 +28,8 @@ interface Tile {
 const tiles: Tile[] = [
   { key: 'home',              label: 'Главная',            icon: Home,      href: '/windows/home' },
   { key: 'funnel',            label: 'Воронка',            icon: Filter,    href: '/windows/funnel' },
-  { key: 'analytics',         label: 'Аналитика',          icon: BarChart2, href: '/windows/analytics' },
+  { key: 'analytics',         label: 'Аналитика',          icon: BarChart2,  href: '/windows/analytics' },
+  { key: 'marketing',         label: 'Маркетинг',          icon: Megaphone,  href: '/windows/marketing' },
   { key: 'learning',          label: 'Обучение',           icon: BookOpen,  href: '/windows/learning' },
   { key: 'business-processes',label: 'Бизнес-процессы',    icon: Layers,    href: '/windows/business-processes' },
   { key: 'hr',                label: 'HR',                 icon: Users,     href: '/windows/hr' },
