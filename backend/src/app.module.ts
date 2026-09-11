@@ -9,6 +9,7 @@ import { ShiftsModule } from './modules/shifts/shifts.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { BranchSettingsModule } from './modules/branch-settings/branch-settings.module';
 import { MarketingModule } from './modules/marketing/marketing.module';
+import { BusinessProcessesModule } from './modules/business-processes/business-processes.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { MarketingModule } from './modules/marketing/marketing.module';
     DashboardModule,
     BranchSettingsModule,
     MarketingModule,
+    BusinessProcessesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
